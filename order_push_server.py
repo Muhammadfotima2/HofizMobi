@@ -2,8 +2,10 @@ import os
 import json
 import base64
 from flask import Flask, request, Response
+
 import firebase_admin
 from firebase_admin import credentials, messaging
+from firebase_admin._messaging_utils import UnregisteredError
 
 # --- Загрузка service account ---
 def _load_firebase_cred():
@@ -27,7 +29,7 @@ if not firebase_admin._apps:
 
 app = Flask(__name__)
 
-# --- Вспомогательная функция ---
+# --- Утилиты ---
 def first_nonempty(d: dict, *keys) -> str | None:
     for k in keys:
         v = d.get(k)
@@ -38,7 +40,7 @@ def first_nonempty(d: dict, *keys) -> str | None:
             return s
     return None
 
-def send_push_to_admin(title: str, customer: str, phone: str, comment: str, total: str, currency: str, data: dict | None = None):
+def format_body(customer: str, phone: str, comment: str, total: str, currency: str) -> str:
     lines = []
     if customer:
         lines.append(f"👤 Имя: {customer}")
@@ -48,25 +50,26 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
         lines.append(f"💬 Комментарий: {comment}")
     if total:
         lines.append(f"💵 Сумма: {total} {currency}")
-    body_text = "\n".join(lines) if lines else "Новый заказ"
+    return "\n".join(lines) if lines else "Сообщение"
 
+def send_push_to_admin(title: str, customer: str, phone: str, comment: str, total: str, currency: str, data: dict | None = None):
+    body_text = format_body(customer, phone, comment, total, currency)
     msg = messaging.Message(
         notification=messaging.Notification(title=title, body=body_text),
         topic="admin",
         data={k: str(v) for k, v in (data or {}).items()},
-        android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(channel_id="orders_high")
-        ),
+        # если канал настроен в приложении, можно вернуть channel_id
+        android=messaging.AndroidConfig(priority="high"),
     )
     resp = messaging.send(msg)
-    print("✅ FCM sent (topic=admin):", resp)
+    print("✅ FCM sent (topic=admin):", resp, flush=True)
     return resp
 
 # --- Роуты ---
 @app.post("/send-order")
 def send_order():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-order payload:", p)   # <-- ЛОГ: что реально пришло
+    print("📥 /send-order payload:", p, flush=True)
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
     customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
@@ -89,29 +92,52 @@ def send_order():
         return Response(json.dumps({"ok": True}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as e:
-        print("❌ FCM error:", e)
+        print("❌ FCM error:", e, flush=True)
         return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
 @app.post("/subscribe-token")
 def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /subscribe-token payload:", p)
+    print("📥 /subscribe-token payload:", p, flush=True)
 
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
                         status=400, content_type="application/json; charset=utf-8")
-    res = messaging.subscribe_to_topic([token], "admin")
-    return Response(json.dumps({"ok": True, "res": getattr(res, '__dict__', {})}, ensure_ascii=False),
-                    content_type="application/json; charset=utf-8")
+    try:
+        res = messaging.subscribe_to_topic([token], "admin")
+        # Сериализуем только примитивы, иначе ErrorInfo ломает json.dumps
+        out = {
+            "success_count": getattr(res, "success_count", 0),
+            "failure_count": getattr(res, "failure_count", 0),
+            "errors": []
+        }
+        errors = getattr(res, "errors", []) or []
+        for e in errors:
+            out["errors"].append({
+                "index": getattr(e, "index", None),
+                "reason": getattr(e, "reason", None),
+                "error_code": getattr(e, "error_code", None),
+                "message": str(e),
+            })
+        return Response(json.dumps({"ok": True, "res": out}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
+    except Exception as ex:
+        print("❌ subscribe-token error:", ex, flush=True)
+        return Response(json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 @app.post("/send-to-token")
 def send_to_token():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-to-token payload:", p)
+    print("📥 /send-to-token payload:", p, flush=True)
 
     token = p.get("token")
+    if not token:
+        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
+
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
     phone = first_nonempty(p, "phone", "phoneNumber", "number", "tel", "contact") or "—"
@@ -119,41 +145,33 @@ def send_to_token():
     total = str(p.get("total", ""))
     currency = p.get("currency", "TJS")
 
-    if not token:
-        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
-                        status=400, content_type="application/json; charset=utf-8")
-
-    lines = []
-    if customer:
-        lines.append(f"👤 Имя: {customer}")
-    if phone:
-        lines.append(f"📞 Номер: {phone}")
-    if comment:
-        lines.append(f"💬 Комментарий: {comment}")
-    if total:
-        lines.append(f"💵 Сумма: {total} {currency}")
-    body_text = "\n".join(lines) if lines else "Сообщение"
-
+    body_text = format_body(customer, phone, comment, total, currency)
     msg = messaging.Message(
         notification=messaging.Notification(title=title, body=body_text),
-        data={
-            "title": title,
-            "body": body_text,
-            "customer": customer,
-            "phone": str(phone),
-            "comment": comment,
-            "total": str(total),
-            "currency": currency
-        },
         token=token,
-        android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(channel_id="orders_high")
-        ),
+        android=messaging.AndroidConfig(priority="high"),
+        data={
+            "title": title, "body": body_text,
+            "customer": customer, "phone": str(phone),
+            "comment": comment, "total": str(total), "currency": currency
+        },
     )
-    resp = messaging.send(msg)
-    print("✅ FCM sent (token):", resp)
-    return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
-                    content_type="application/json; charset=utf-8")
+    try:
+        resp = messaging.send(msg)
+        print("✅ FCM sent (to token):", resp, flush=True)
+        return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
+    except UnregisteredError as ue:
+        print("❌ Unregistered token:", ue, flush=True)
+        return Response(json.dumps({
+            "ok": False,
+            "error": "unregistered_token",
+            "hint": "Получите новый FirebaseMessaging.getToken() в приложении и повторите."
+        }, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
+    except Exception as e:
+        print("❌ send-to-token error:", e, flush=True)
+        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
