@@ -1,0 +1,88 @@
+# order_push_server.py
+import os
+import json
+from flask import Flask, request, jsonify
+import firebase_admin
+from firebase_admin import credentials, messaging
+
+# === Firebase Admin инициализация из ENV ===
+# В Railway положим ВЕСЬ JSON ключа в переменную FIREBASE_SERVICE_ACCOUNT
+svc_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+if not svc_json:
+    raise RuntimeError("FIREBASE_SERVICE_ACCOUNT env var is missing")
+cred = credentials.Certificate(json.loads(svc_json))
+firebase_admin.initialize_app(cred)
+
+app = Flask(__name__)
+
+def send_push_to_admin(title: str, body: str, data: dict | None = None):
+    """Отправить уведомление всем, кто подписан на тему 'admin'."""
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        topic="admin",
+        data={k: str(v) for k, v in (data or {}).items()},
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(channel_id="default_channel")
+        ),
+    )
+    resp = messaging.send(msg)
+    print("✅ FCM sent (topic admin):", resp)
+    return resp
+
+@app.post("/send-order")
+def send_order():
+    """Принять заказ и отправить пуш в тему 'admin'."""
+    p = request.get_json(force=True, silent=True) or {}
+    order_id = p.get("orderId", "N/A")
+    customer = p.get("customerName", "Клиент")
+    total = p.get("total", 0)
+    currency = p.get("currency", "TJS")
+    title = "📦 Новый заказ"
+    body  = f"#{order_id} от {customer} • {total} {currency}"
+    try:
+        send_push_to_admin(title, body, {"orderId": order_id})
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print("❌ FCM error:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.post("/subscribe-token")
+def subscribe_token():
+    """Подписать конкретный FCM-токен на тему 'admin'."""
+    p = request.get_json(force=True, silent=True) or {}
+    token = p.get("token")
+    if not token:
+        return jsonify({"ok": False, "error": "no token"}), 400
+    res = messaging.subscribe_to_topic([token], "admin")
+    # Приводим объект результата к сериализуемому виду
+    res_dict = getattr(res, '__dict__', {})
+    return jsonify({"ok": True, "res": res_dict}), 200
+
+@app.post("/send-to-token")
+def send_to_token():
+    """Отправить пуш напрямую на указанный токен (для тестов)."""
+    p = request.get_json(force=True, silent=True) or {}
+    token = p.get("token")
+    title = p.get("title", "Тест")
+    body  = p.get("body", "Привет!")
+    if not token:
+        return jsonify({"ok": False, "error": "no token"}), 400
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        token=token,
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(channel_id="default_channel")
+        ),
+    )
+    resp = messaging.send(msg)
+    print("✅ FCM sent (token):", resp)
+    return jsonify({"ok": True, "resp": resp}), 200
+
+@app.get("/")
+def root():
+    return "OK", 200
+
+if __name__ == "__main__":
+    # Railway передаёт порт через переменную PORT
+    port = int(os.environ.get("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port, debug=False)
