@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import threading
 from flask import Flask, request, Response
 
 import firebase_admin
@@ -76,39 +77,42 @@ def send_order():
         "customerName", "customer_name", "name", "customer"
     ) or "Клиент"
 
-    # 🔧 расширили список возможных ключей для номера
-    phone = first_nonempty(
-        p,
+    # Расширенные ключи для телефона
+    phone_keys = [
         "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
         "number", "tel", "contact"
-    ) or "—"
+    ]
+    phone = first_nonempty(p, *phone_keys) or "—"
+    matched_key = next((k for k in phone_keys if str(p.get(k) or "").strip()), None)
+    print(f"ℹ️ phone matched_key={matched_key} value={phone}", flush=True)
 
     comment = first_nonempty(p, "comment", "comments", "remark", "note") or ""
     total = first_nonempty(p, "total", "sum", "amount") or ""
     currency = first_nonempty(p, "currency", "curr") or "TJS"
     title = "💼 Новый заказ"
 
-    try:
-        send_push_to_admin(
-            title=title,
-            customer=customer,
-            phone=phone,
-            comment=comment,
-            total=str(total),
-            currency=currency,
-            data={"orderId": order_id}
-        )
-        return Response(
-            json.dumps({"ok": True}, ensure_ascii=False),
-            content_type="application/json; charset=utf-8"
-        )
-    except Exception as e:
-        print("❌ FCM error:", e, flush=True)
-        return Response(
-            json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
-            status=500,
-            content_type="application/json; charset=utf-8"
-        )
+    # 🔥 Отправляем пуш в фоне, чтобы ответить клиенту мгновенно
+    def push_job():
+        try:
+            send_push_to_admin(
+                title=title,
+                customer=customer,
+                phone=phone,
+                comment=comment,
+                total=str(total),
+                currency=currency,
+                data={"orderId": order_id}
+            )
+        except Exception as e:
+            print("❌ push error (background):", e, flush=True)
+
+    threading.Thread(target=push_job, daemon=True).start()
+
+    # ⚡ сразу отвечаем клиенту
+    return Response(
+        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+        content_type="application/json; charset=utf-8"
+    )
 
 @app.post("/subscribe-token")
 def subscribe_token():
@@ -154,7 +158,6 @@ def send_to_token():
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
 
-    # 🔧 расширили список возможных ключей и здесь тоже
     phone = first_nonempty(
         p,
         "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
@@ -166,32 +169,33 @@ def send_to_token():
     currency = p.get("currency", "TJS")
 
     body_text = format_body(customer, phone, comment, total, currency)
-    msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body_text),
-        token=token,
-        android=messaging.AndroidConfig(priority="high"),
-        data={
-            "title": title, "body": body_text,
-            "customer": customer, "phone": str(phone),
-            "comment": comment, "total": str(total), "currency": currency
-        },
+
+    # 🔥 Отправляем пуш в фоне, отдаём ответ мгновенно
+    def push_job():
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body_text),
+                token=token,
+                android=messaging.AndroidConfig(priority="high"),
+                data={
+                    "title": title, "body": body_text,
+                    "customer": customer, "phone": str(phone),
+                    "comment": comment, "total": str(total), "currency": currency
+                },
+            )
+            resp = messaging.send(msg)
+            print("✅ FCM sent (to token):", resp, flush=True)
+        except UnregisteredError as ue:
+            print("❌ Unregistered token:", ue, flush=True)
+        except Exception as e:
+            print("❌ send-to-token error (background):", e, flush=True)
+
+    threading.Thread(target=push_job, daemon=True).start()
+
+    return Response(
+        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+        content_type="application/json; charset=utf-8"
     )
-    try:
-        resp = messaging.send(msg)
-        print("✅ FCM sent (to token):", resp, flush=True)
-        return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
-                        content_type="application/json; charset=utf-8")
-    except UnregisteredError as ue:
-        print("❌ Unregistered token:", ue, flush=True)
-        return Response(json.dumps({
-            "ok": False,
-            "error": "unregistered_token",
-            "hint": "Получите новый FirebaseMessaging.getToken() в приложении и повторите."
-        }, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
-    except Exception as e:
-        print("❌ send-to-token error:", e, flush=True)
-        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
-                        status=500, content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
