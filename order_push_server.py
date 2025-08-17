@@ -71,8 +71,18 @@ def send_order():
     print("📥 /send-order payload:", p, flush=True)
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
-    customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
-    phone = first_nonempty(p, "phone", "phoneNumber", "number", "tel", "contact") or "—"
+    customer = first_nonempty(
+        p,
+        "customerName", "customer_name", "name", "customer"
+    ) or "Клиент"
+
+    # 🔧 расширили список возможных ключей для номера
+    phone = first_nonempty(
+        p,
+        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
+        "number", "tel", "contact"
+    ) or "—"
+
     comment = first_nonempty(p, "comment", "comments", "remark", "note") or ""
     total = first_nonempty(p, "total", "sum", "amount") or ""
     currency = first_nonempty(p, "currency", "curr") or "TJS"
@@ -88,12 +98,17 @@ def send_order():
             currency=currency,
             data={"orderId": order_id}
         )
-        return Response(json.dumps({"ok": True}, ensure_ascii=False),
-                        content_type="application/json; charset=utf-8")
+        return Response(
+            json.dumps({"ok": True}, ensure_ascii=False),
+            content_type="application/json; charset=utf-8"
+        )
     except Exception as e:
         print("❌ FCM error:", e, flush=True)
-        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
-                        status=500, content_type="application/json; charset=utf-8")
+        return Response(
+            json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+            status=500,
+            content_type="application/json; charset=utf-8"
+        )
 
 @app.post("/subscribe-token")
 def subscribe_token():
@@ -138,7 +153,14 @@ def send_to_token():
 
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
-    phone = first_nonempty(p, "phone", "phoneNumber", "number", "tel", "contact") or "—"
+
+    # 🔧 расширили список возможных ключей и здесь тоже
+    phone = first_nonempty(
+        p,
+        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
+        "number", "tel", "contact"
+    ) or "—"
+
     comment = p.get("comment", "")
     total = str(p.get("total", ""))
     currency = p.get("currency", "TJS")
