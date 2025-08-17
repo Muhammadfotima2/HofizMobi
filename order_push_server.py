@@ -108,9 +108,9 @@ def send_order():
 
     threading.Thread(target=push_job, daemon=True).start()
 
-    # ⚡ сразу отвечаем клиенту
+    # ⚡ сразу отвечаем клиенту, без ожидания Firebase
     return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+        json.dumps({"ok": True}, ensure_ascii=False),
         content_type="application/json; charset=utf-8"
     )
 
@@ -158,6 +158,7 @@ def send_to_token():
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
 
+    # Те же расширенные ключи для телефона
     phone = first_nonempty(
         p,
         "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
@@ -169,33 +170,32 @@ def send_to_token():
     currency = p.get("currency", "TJS")
 
     body_text = format_body(customer, phone, comment, total, currency)
-
-    # 🔥 Отправляем пуш в фоне, отдаём ответ мгновенно
-    def push_job():
-        try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body_text),
-                token=token,
-                android=messaging.AndroidConfig(priority="high"),
-                data={
-                    "title": title, "body": body_text,
-                    "customer": customer, "phone": str(phone),
-                    "comment": comment, "total": str(total), "currency": currency
-                },
-            )
-            resp = messaging.send(msg)
-            print("✅ FCM sent (to token):", resp, flush=True)
-        except UnregisteredError as ue:
-            print("❌ Unregistered token:", ue, flush=True)
-        except Exception as e:
-            print("❌ send-to-token error (background):", e, flush=True)
-
-    threading.Thread(target=push_job, daemon=True).start()
-
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body_text),
+        token=token,
+        android=messaging.AndroidConfig(priority="high"),
+        data={
+            "title": title, "body": body_text,
+            "customer": customer, "phone": str(phone),
+            "comment": comment, "total": str(total), "currency": currency
+        },
     )
+    try:
+        resp = messaging.send(msg)
+        print("✅ FCM sent (to token):", resp, flush=True)
+        return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
+    except UnregisteredError as ue:
+        print("❌ Unregistered token:", ue, flush=True)
+        return Response(json.dumps({
+            "ok": False,
+            "error": "unregistered_token",
+            "hint": "Получите новый FirebaseMessaging.getToken() в приложении и повторите."
+        }, ensure_ascii=False), status=400, content_type="application/json; charset=utf-8")
+    except Exception as e:
+        print("❌ send-to-token error:", e, flush=True)
+        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
