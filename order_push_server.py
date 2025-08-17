@@ -17,24 +17,34 @@ app = Flask(__name__)
 def send_push_to_admin(title: str, body: str, data: dict | None = None):
     """Отправить уведомление всем, кто подписан на тему 'admin'."""
     msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body),
         topic="admin",
-        data={k: str(v) for k, v in (data or {}).items()},
-        android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(channel_id="default_channel")
+        notification=messaging.Notification(
+            title=title,
+            body=body,
         ),
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(
+                channel_id="orders_high",   # ДОЛЖЕН совпадать с приложением
+                sound="default",
+            )
+        ),
+        apns=messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default")
+            )
+        ),
+        data={k: str(v) for k, v in (data or {}).items()},
     )
     resp = messaging.send(msg)
     print("✅ FCM sent (topic admin):", resp)
     return resp
 
 def format_body(customer: str, phone: str, comment: str, total: str, currency: str) -> str:
-    """Собираем текст уведомления красиво, без пустых строк"""
-    lines = [
-        f"Имя: {customer}",
-        f"Номер: {phone}",
-    ]
-    if comment:  # только если комментарий не пустой
+    """Собираем текст уведомления красиво, без пустых строк."""
+    lines = [f"Имя: {customer}"]
+    if phone:      # добавляем ТОЛЬКО если не пусто
+        lines.append(f"Номер: {phone}")
+    if comment:    # добавляем ТОЛЬКО если не пусто
         lines.append(f"Комментарий: {comment}")
     lines.append(f"Сумма: {total} {currency}")
     return "\n".join(lines)
@@ -45,12 +55,12 @@ def send_order():
     p = request.get_json(force=True, silent=True) or {}
     order_id = p.get("orderId", "N/A")
     customer = p.get("customerName", "Клиент")
-    phone = p.get("phone", "—")
-    comment = p.get("comment", "")
-    total = p.get("total", 0)
+    phone    = p.get("phone", "")       # ← пусто, если номера нет
+    comment  = p.get("comment", "")
+    total    = p.get("total", 0)
     currency = p.get("currency", "TJS")
 
-    title = "📦 Новый заказ"
+    title = "Новый заказ"  # без эмодзи для 100% совместимости
     body  = format_body(customer, phone, comment, total, currency)
 
     try:
@@ -69,6 +79,7 @@ def subscribe_token():
         return jsonify({"ok": False, "error": "no token"}), 400
     try:
         res = messaging.subscribe_to_topic([token], "admin")
+        print(f"📌 Subscribed token to 'admin': success={res.success_count}, failure={res.failure_count}")
         return jsonify({
             "ok": True,
             "successCount": res.success_count,
@@ -90,10 +101,18 @@ def send_to_token():
         return jsonify({"ok": False, "error": "no token"}), 400
     try:
         msg = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
             token=token,
+            notification=messaging.Notification(title=title, body=body),
             android=messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(channel_id="default_channel")
+                notification=messaging.AndroidNotification(
+                    channel_id="orders_high",
+                    sound="default",
+                )
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(sound="default")
+                )
             ),
         )
         resp = messaging.send(msg)
