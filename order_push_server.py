@@ -1,62 +1,44 @@
-# order_push_server.py
 import os
 import json
 import base64
 from flask import Flask, request, Response
-
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-# --- Инициализация Firebase Admin (устойчиво к разным форматам ключа) ---
+# --- Загрузка service account ---
 def _load_firebase_cred():
-    """
-    Пытаемся взять ключ из:
-    1) FIREBASE_SERVICE_ACCOUNT (RAW JSON)
-    2) FIREBASE_SERVICE_ACCOUNT_B64 (base64 от JSON)
-    3) serviceAccountKey.json (локальный файл — для локальной разработки)
-    """
     raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
 
-    # 1) RAW JSON в переменной
     if raw:
-        try:
-            data = json.loads(raw)
-            return credentials.Certificate(data)
-        except Exception as e:
-            print("⚠️  FIREBASE_SERVICE_ACCOUNT: не смог распарсить JSON:", e)
-
-    # 2) base64 JSON в переменной
+        return credentials.Certificate(json.loads(raw))
     if b64:
-        try:
-            decoded = base64.b64decode(b64).decode("utf-8")
-            data = json.loads(decoded)
-            return credentials.Certificate(data)
-        except Exception as e:
-            print("⚠️  FIREBASE_SERVICE_ACCOUNT_B64: не смог декодировать/распарсить JSON:", e)
-
-    # 3) Файл (локально)
+        decoded = base64.b64decode(b64).decode("utf-8")
+        return credentials.Certificate(json.loads(decoded))
     if os.path.exists("serviceAccountKey.json"):
-        try:
-            return credentials.Certificate("serviceAccountKey.json")
-        except Exception as e:
-            print("⚠️  serviceAccountKey.json найден, но не читается:", e)
+        return credentials.Certificate("serviceAccountKey.json")
 
-    raise RuntimeError(
-        "Не найден Firebase service account. "
-        "Задайте ENV FIREBASE_SERVICE_ACCOUNT (RAW JSON) или FIREBASE_SERVICE_ACCOUNT_B64 (base64 JSON), "
-        "или положите файл serviceAccountKey.json."
-    )
+    raise RuntimeError("Нет ключа Firebase (ENV или serviceAccountKey.json)")
 
-# Инициализация (избегаем повторной инициализации под gunicorn)
+# --- Инициализация Firebase ---
 if not firebase_admin._apps:
     cred = _load_firebase_cred()
     firebase_admin.initialize_app(cred)
 
 app = Flask(__name__)
 
+# --- Вспомогательная функция ---
+def first_nonempty(d: dict, *keys) -> str | None:
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return None
+
 def send_push_to_admin(title: str, customer: str, phone: str, comment: str, total: str, currency: str, data: dict | None = None):
-    # Тело уведомления
     lines = []
     if customer:
         lines.append(f"👤 Имя: {customer}")
@@ -80,16 +62,18 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
     print("✅ FCM sent (topic=admin):", resp)
     return resp
 
+# --- Роуты ---
 @app.post("/send-order")
 def send_order():
     p = request.get_json(force=True, silent=True) or {}
+    print("📥 /send-order payload:", p)   # <-- ЛОГ: что реально пришло
 
-    order_id = p.get("orderId", "N/A")
-    customer = p.get("customerName", "Клиент")
-    phone = p.get("phone") or p.get("phoneNumber") or p.get("number") or "—"
-    comment = p.get("comment", "")
-    total = str(p.get("total", ""))  # строка
-    currency = p.get("currency", "TJS")
+    order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
+    customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
+    phone = first_nonempty(p, "phone", "phoneNumber", "number", "tel", "contact") or "—"
+    comment = first_nonempty(p, "comment", "comments", "remark", "note") or ""
+    total = first_nonempty(p, "total", "sum", "amount") or ""
+    currency = first_nonempty(p, "currency", "curr") or "TJS"
     title = "💼 Новый заказ"
 
     try:
@@ -98,7 +82,7 @@ def send_order():
             customer=customer,
             phone=phone,
             comment=comment,
-            total=total,
+            total=str(total),
             currency=currency,
             data={"orderId": order_id}
         )
@@ -112,22 +96,25 @@ def send_order():
 @app.post("/subscribe-token")
 def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
+    print("📥 /subscribe-token payload:", p)
+
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
                         status=400, content_type="application/json; charset=utf-8")
     res = messaging.subscribe_to_topic([token], "admin")
-    res_dict = getattr(res, '__dict__', {})
-    return Response(json.dumps({"ok": True, "res": res_dict}, ensure_ascii=False),
+    return Response(json.dumps({"ok": True, "res": getattr(res, '__dict__', {})}, ensure_ascii=False),
                     content_type="application/json; charset=utf-8")
 
 @app.post("/send-to-token")
 def send_to_token():
     p = request.get_json(force=True, silent=True) or {}
+    print("📥 /send-to-token payload:", p)
+
     token = p.get("token")
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
-    phone = p.get("phone") or p.get("phoneNumber") or p.get("number") or "—"
+    phone = first_nonempty(p, "phone", "phoneNumber", "number", "tel", "contact") or "—"
     comment = p.get("comment", "")
     total = str(p.get("total", ""))
     currency = p.get("currency", "TJS")
@@ -177,6 +164,5 @@ def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
-    # Для локального запуска: python order_push_server.py
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
