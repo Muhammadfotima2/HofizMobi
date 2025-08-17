@@ -1,7 +1,7 @@
 # order_push_server.py
 import os
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -17,36 +17,33 @@ app = Flask(__name__)
 def send_push_to_admin(title: str, body: str, data: dict | None = None):
     """Отправить уведомление всем, кто подписан на тему 'admin'."""
     msg = messaging.Message(
-        topic="admin",
         notification=messaging.Notification(
             title=title,
-            body=body,
+            body=body
         ),
+        topic="admin",
+        data={k: str(v) for k, v in (data or {}).items()},
         android=messaging.AndroidConfig(
             notification=messaging.AndroidNotification(
-                channel_id="orders_high",   # ДОЛЖЕН совпадать с приложением
-                sound="default",
+                channel_id="orders_high"
             )
         ),
-        apns=messaging.APNSConfig(
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(sound="default")
-            )
-        ),
-        data={k: str(v) for k, v in (data or {}).items()},
     )
     resp = messaging.send(msg)
     print("✅ FCM sent (topic admin):", resp)
     return resp
 
 def format_body(customer: str, phone: str, comment: str, total: str, currency: str) -> str:
-    """Собираем текст уведомления красиво, без пустых строк."""
-    lines = [f"Имя: {customer}"]
-    if phone:      # добавляем ТОЛЬКО если не пусто
-        lines.append(f"Номер: {phone}")
-    if comment:    # добавляем ТОЛЬКО если не пусто
-        lines.append(f"Комментарий: {comment}")
-    lines.append(f"Сумма: {total} {currency}")
+    """Формируем текст уведомления c эмодзи"""
+    lines = []
+    if customer:
+        lines.append(f"👤 Имя: {customer}")
+    if phone:
+        lines.append(f"📞 Номер: {phone}")
+    if comment:
+        lines.append(f"💬 Комментарий: {comment}")
+    if total:
+        lines.append(f"💵 Сумма: {total} {currency}")
     return "\n".join(lines)
 
 @app.post("/send-order")
@@ -55,20 +52,22 @@ def send_order():
     p = request.get_json(force=True, silent=True) or {}
     order_id = p.get("orderId", "N/A")
     customer = p.get("customerName", "Клиент")
-    phone    = p.get("phone", "")       # ← пусто, если номера нет
-    comment  = p.get("comment", "")
-    total    = p.get("total", 0)
+    phone = p.get("phone", "—")
+    comment = p.get("comment", "")
+    total = p.get("total", 0)
     currency = p.get("currency", "TJS")
 
-    title = "Новый заказ"  # без эмодзи для 100% совместимости
+    title = "📦 Новый заказ"
     body  = format_body(customer, phone, comment, total, currency)
 
     try:
         send_push_to_admin(title, body, {"orderId": order_id})
-        return jsonify({"ok": True}), 200
+        return Response(json.dumps({"ok": True}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
     except Exception as e:
         print("❌ FCM error:", e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 @app.post("/subscribe-token")
 def subscribe_token():
@@ -76,19 +75,12 @@ def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
     token = p.get("token")
     if not token:
-        return jsonify({"ok": False, "error": "no token"}), 400
-    try:
-        res = messaging.subscribe_to_topic([token], "admin")
-        print(f"📌 Subscribed token to 'admin': success={res.success_count}, failure={res.failure_count}")
-        return jsonify({
-            "ok": True,
-            "successCount": res.success_count,
-            "failureCount": res.failure_count,
-            "errors": [str(e) for e in res.errors] if res.failure_count else []
-        }), 200
-    except Exception as e:
-        print("❌ Ошибка подписки:", e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
+    res = messaging.subscribe_to_topic([token], "admin")
+    res_dict = getattr(res, '__dict__', {})
+    return Response(json.dumps({"ok": True, "res": res_dict}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
 
 @app.post("/send-to-token")
 def send_to_token():
@@ -98,33 +90,23 @@ def send_to_token():
     title = p.get("title", "Тест")
     body  = p.get("body", "Привет!")
     if not token:
-        return jsonify({"ok": False, "error": "no token"}), 400
-    try:
-        msg = messaging.Message(
-            token=token,
-            notification=messaging.Notification(title=title, body=body),
-            android=messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(
-                    channel_id="orders_high",
-                    sound="default",
-                )
-            ),
-            apns=messaging.APNSConfig(
-                payload=messaging.APNSPayload(
-                    aps=messaging.Aps(sound="default")
-                )
-            ),
-        )
-        resp = messaging.send(msg)
-        print("✅ FCM sent (token):", resp)
-        return jsonify({"ok": True, "resp": resp}), 200
-    except Exception as e:
-        print("❌ Ошибка отправки токену:", e)
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
+    msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
+        token=token,
+        android=messaging.AndroidConfig(
+            notification=messaging.AndroidNotification(channel_id="orders_high")
+        ),
+    )
+    resp = messaging.send(msg)
+    print("✅ FCM sent (token):", resp)
+    return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
 
 @app.get("/")
 def root():
-    return "OK", 200
+    return Response("OK", content_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
