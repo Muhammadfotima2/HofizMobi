@@ -1,7 +1,7 @@
 # order_push_server.py
 import os
 import json
-from flask import Flask, request, Response
+from flask import Flask, request, jsonify, Response
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -37,26 +37,33 @@ def format_body(customer: str, phone: str, comment: str, total: str, currency: s
     """Формируем текст уведомления c эмодзи"""
     lines = []
     if customer:
-        lines.append(f"👤 Имя: {customer}")
+        lines.append(f"👤 Имя: {str(customer)}")
     if phone:
-        lines.append(f"📞 Номер: {phone}")
+        lines.append(f"📞 Номер: {str(phone)}")
     if comment:
-        lines.append(f"💬 Комментарий: {comment}")
-    lines.append(f"💵 Сумма: {total} {currency}")
+        lines.append(f"💬 Комментарий: {str(comment)}")
+    if total:
+        lines.append(f"💵 Сумма: {str(total)} {str(currency)}")
     return "\n".join(lines)
 
 @app.post("/send-order")
 def send_order():
     """Принять заказ и отправить пуш в тему 'admin'."""
     p = request.get_json(force=True, silent=True) or {}
+    print("📩 Получен заказ:", p, flush=True)   # лог для отладки
+
     order_id = p.get("orderId", "N/A")
     customer = p.get("customerName", "Клиент")
-    phone = p.get("phone", "—")
+
+    # фикс для номера: ищем в нескольких ключах
+    raw_phone = p.get("phone") or p.get("phoneNumber") or p.get("number") or ""
+    phone = str(raw_phone).strip()
+
     comment = p.get("comment", "")
     total = str(p.get("total", "0"))
-    currency = p.get("currency", "TJS")
+    currency = str(p.get("currency", "TJS"))
 
-    title = "Новый заказ"
+    title = "💼 Новый заказ"
     body  = format_body(customer, phone, comment, total, currency)
 
     try:
