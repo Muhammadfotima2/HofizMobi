@@ -1,10 +1,11 @@
 # order_push_server.py
-import os, json
+import os
+import json
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-# === Firebase Admin из переменной окружения ===
+# === Firebase Admin инициализация из ENV ===
 svc_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
 if not svc_json:
     raise RuntimeError("FIREBASE_SERVICE_ACCOUNT env var is missing")
@@ -13,112 +14,82 @@ firebase_admin.initialize_app(cred)
 
 app = Flask(__name__)
 
-# ---------- УТИЛИТА ОТПРАВКИ НА ТЕМУ admin (БЕЗ ФОТО, БЕЗ ЭМОДЗИ) ----------
-def send_push_to_admin(*, customer_name: str, phone: str, comment: str, total: str, currency: str = "TJS"):
-    title = "Новый заказ"  # стандартный заголовок без эмодзи
-    # Аккуратный текст по строкам (системное уведомление само выравнивает)
-    body = (
-        f"Имя: {customer_name}\n"
-        f"Номер: {phone}\n"
-        f"Комментарий: {comment}\n"
-        f"Сумма: {total} {currency}"
-    )
-
+def send_push_to_admin(title: str, body: str, data: dict | None = None):
+    """Отправить уведомление всем, кто подписан на тему 'admin'."""
     msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
         topic="admin",
-        notification=messaging.Notification(
-            title=title,
-            body=body,
-            image=None  # гарантированно без картинок
-        ),
+        data={k: str(v) for k, v in (data or {}).items()},
         android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(
-                channel_id="orders_high",  # ваш звуковой канал в приложении
-                sound="default"
-            )
+            notification=messaging.AndroidNotification(channel_id="default_channel")
         ),
-        apns=messaging.APNSConfig(
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(sound="default")
-            )
-        ),
-        # дублируем данные для вашего overlay в приложении (если нужно)
-        data={
-            "customerName": customer_name or "",
-            "phone": phone or "",
-            "comment": comment or "",
-            "total": total or "",
-            "currency": currency or "TJS",
-        }
     )
     resp = messaging.send(msg)
     print("✅ FCM sent (topic admin):", resp)
     return resp
 
-# ---------- РОУТ ДЛЯ ПРИЁМА ЗАКАЗА И ОТПРАВКИ ПУША ----------
+def format_body(customer: str, phone: str, comment: str, total: str, currency: str) -> str:
+    """Собираем текст уведомления красиво, без пустых строк"""
+    lines = [
+        f"Имя: {customer}",
+        f"Номер: {phone}",
+    ]
+    if comment:  # только если комментарий не пустой
+        lines.append(f"Комментарий: {comment}")
+    lines.append(f"Сумма: {total} {currency}")
+    return "\n".join(lines)
+
 @app.post("/send-order")
 def send_order():
+    """Принять заказ и отправить пуш в тему 'admin'."""
     p = request.get_json(force=True, silent=True) or {}
-    customer = str(p.get("customerName", "")).strip()
-    phone    = str(p.get("phone", "")).strip()
-    comment  = str(p.get("comment", "")).strip()
-    total    = str(p.get("total", "")).strip()
-    currency = str(p.get("currency", "TJS")).strip() or "TJS"
+    order_id = p.get("orderId", "N/A")
+    customer = p.get("customerName", "Клиент")
+    phone = p.get("phone", "—")
+    comment = p.get("comment", "")
+    total = p.get("total", 0)
+    currency = p.get("currency", "TJS")
+
+    title = "📦 Новый заказ"
+    body  = format_body(customer, phone, comment, total, currency)
 
     try:
-        send_push_to_admin(
-            customer_name=customer,
-            phone=phone,
-            comment=comment,
-            total=total,
-            currency=currency,
-        )
-        return jsonify({"ok": True})
+        send_push_to_admin(title, body, {"orderId": order_id})
+        return jsonify({"ok": True}), 200
     except Exception as e:
         print("❌ FCM error:", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# ---------- ОСТАЛЬНЫЕ ПОЛЕЗНЫЕ РОУТЫ (по желанию) ----------
 @app.post("/subscribe-token")
 def subscribe_token():
+    """Подписать конкретный FCM-токен на тему 'admin'."""
     p = request.get_json(force=True, silent=True) or {}
     token = p.get("token")
     if not token:
         return jsonify({"ok": False, "error": "no token"}), 400
     res = messaging.subscribe_to_topic([token], "admin")
-    return jsonify({"ok": True, "res": getattr(res, "__dict__", {})})
+    res_dict = getattr(res, '__dict__', {})
+    return jsonify({"ok": True, "res": res_dict}), 200
 
 @app.post("/send-to-token")
 def send_to_token():
+    """Отправить пуш напрямую на указанный токен (для тестов)."""
     p = request.get_json(force=True, silent=True) or {}
     token = p.get("token")
-    customer = str(p.get("customerName", "")).strip()
-    phone    = str(p.get("phone", "")).strip()
-    comment  = str(p.get("comment", "")).strip()
-    total    = str(p.get("total", "")).strip()
-    currency = str(p.get("currency", "TJS")).strip() or "TJS"
+    title = p.get("title", "Тест")
+    body  = p.get("body", "Привет!")
     if not token:
         return jsonify({"ok": False, "error": "no token"}), 400
-
-    title = "Новый заказ"
-    body = (
-        f"Имя: {customer}\n"
-        f"Номер: {phone}\n"
-        f"Комментарий: {comment}\n"
-        f"Сумма: {total} {currency}"
-    )
-
     msg = messaging.Message(
+        notification=messaging.Notification(title=title, body=body),
         token=token,
-        notification=messaging.Notification(title=title, body=body, image=None),
         android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(channel_id="orders_high", sound="default")
+            notification=messaging.AndroidNotification(channel_id="default_channel")
         ),
-        apns=messaging.APNSConfig(payload=messaging.APNSPayload(aps=messaging.Aps(sound="default"))),
-        data={"customerName": customer, "phone": phone, "comment": comment, "total": total, "currency": currency},
     )
     resp = messaging.send(msg)
-    return jsonify({"ok": True, "resp": resp})
+    print("✅ FCM sent (token):", resp)
+    return jsonify({"ok": True, "resp": resp}), 200
 
 @app.get("/")
 def root():
