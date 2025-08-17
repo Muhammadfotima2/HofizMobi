@@ -58,7 +58,6 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
         notification=messaging.Notification(title=title, body=body_text),
         topic="admin",
         data={k: str(v) for k, v in (data or {}).items()},
-        # если канал настроен в приложении, можно вернуть channel_id
         android=messaging.AndroidConfig(priority="high"),
     )
     resp = messaging.send(msg)
@@ -107,7 +106,6 @@ def subscribe_token():
                         status=400, content_type="application/json; charset=utf-8")
     try:
         res = messaging.subscribe_to_topic([token], "admin")
-        # Сериализуем только примитивы, иначе ErrorInfo ломает json.dumps
         out = {
             "success_count": getattr(res, "success_count", 0),
             "failure_count": getattr(res, "failure_count", 0),
