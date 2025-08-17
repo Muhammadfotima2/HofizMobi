@@ -1,26 +1,62 @@
 # order_push_server.py
 import os
 import json
-from flask import Flask, request, jsonify, Response
+import base64
+from flask import Flask, request, Response
+
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-# === Firebase Admin инициализация из ENV или файла ===
-svc_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
-if svc_json:
-    cred = credentials.Certificate(json.loads(svc_json))
-else:
-    # если работаешь локально, используй файл
-    cred = credentials.Certificate("serviceAccountKey.json")
+# --- Инициализация Firebase Admin (устойчиво к разным форматам ключа) ---
+def _load_firebase_cred():
+    """
+    Пытаемся взять ключ из:
+    1) FIREBASE_SERVICE_ACCOUNT (RAW JSON)
+    2) FIREBASE_SERVICE_ACCOUNT_B64 (base64 от JSON)
+    3) serviceAccountKey.json (локальный файл — для локальной разработки)
+    """
+    raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
 
-firebase_admin.initialize_app(cred)
+    # 1) RAW JSON в переменной
+    if raw:
+        try:
+            data = json.loads(raw)
+            return credentials.Certificate(data)
+        except Exception as e:
+            print("⚠️  FIREBASE_SERVICE_ACCOUNT: не смог распарсить JSON:", e)
+
+    # 2) base64 JSON в переменной
+    if b64:
+        try:
+            decoded = base64.b64decode(b64).decode("utf-8")
+            data = json.loads(decoded)
+            return credentials.Certificate(data)
+        except Exception as e:
+            print("⚠️  FIREBASE_SERVICE_ACCOUNT_B64: не смог декодировать/распарсить JSON:", e)
+
+    # 3) Файл (локально)
+    if os.path.exists("serviceAccountKey.json"):
+        try:
+            return credentials.Certificate("serviceAccountKey.json")
+        except Exception as e:
+            print("⚠️  serviceAccountKey.json найден, но не читается:", e)
+
+    raise RuntimeError(
+        "Не найден Firebase service account. "
+        "Задайте ENV FIREBASE_SERVICE_ACCOUNT (RAW JSON) или FIREBASE_SERVICE_ACCOUNT_B64 (base64 JSON), "
+        "или положите файл serviceAccountKey.json."
+    )
+
+# Инициализация (избегаем повторной инициализации под gunicorn)
+if not firebase_admin._apps:
+    cred = _load_firebase_cred()
+    firebase_admin.initialize_app(cred)
 
 app = Flask(__name__)
 
 def send_push_to_admin(title: str, customer: str, phone: str, comment: str, total: str, currency: str, data: dict | None = None):
-    """Отправить уведомление всем, кто подписан на тему 'admin'."""
-
-    # Собираем красивый текст с эмодзи
+    # Тело уведомления
     lines = []
     if customer:
         lines.append(f"👤 Имя: {customer}")
@@ -30,39 +66,30 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
         lines.append(f"💬 Комментарий: {comment}")
     if total:
         lines.append(f"💵 Сумма: {total} {currency}")
-
-    body_text = "\n".join(lines)
+    body_text = "\n".join(lines) if lines else "Новый заказ"
 
     msg = messaging.Message(
-        notification=messaging.Notification(
-            title=title,
-            body=body_text
-        ),
+        notification=messaging.Notification(title=title, body=body_text),
         topic="admin",
         data={k: str(v) for k, v in (data or {}).items()},
         android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(
-                channel_id="orders_high"
-            )
+            notification=messaging.AndroidNotification(channel_id="orders_high")
         ),
     )
-
     resp = messaging.send(msg)
-    print("✅ FCM sent (topic admin):", resp)
+    print("✅ FCM sent (topic=admin):", resp)
     return resp
 
 @app.post("/send-order")
 def send_order():
-    """Принять заказ и отправить пуш в тему 'admin'."""
     p = request.get_json(force=True, silent=True) or {}
 
     order_id = p.get("orderId", "N/A")
     customer = p.get("customerName", "Клиент")
     phone = p.get("phone") or p.get("phoneNumber") or p.get("number") or "—"
     comment = p.get("comment", "")
-    total = str(p.get("total", ""))  # всегда строка
+    total = str(p.get("total", ""))  # строка
     currency = p.get("currency", "TJS")
-
     title = "💼 Новый заказ"
 
     try:
@@ -84,7 +111,6 @@ def send_order():
 
 @app.post("/subscribe-token")
 def subscribe_token():
-    """Подписать конкретный FCM-токен на тему 'admin'."""
     p = request.get_json(force=True, silent=True) or {}
     token = p.get("token")
     if not token:
@@ -97,7 +123,6 @@ def subscribe_token():
 
 @app.post("/send-to-token")
 def send_to_token():
-    """Отправить пуш напрямую на указанный токен (для тестов)."""
     p = request.get_json(force=True, silent=True) or {}
     token = p.get("token")
     title = p.get("title", "Тест")
@@ -111,7 +136,6 @@ def send_to_token():
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
                         status=400, content_type="application/json; charset=utf-8")
 
-    # Формируем текст так же красиво
     lines = []
     if customer:
         lines.append(f"👤 Имя: {customer}")
@@ -121,7 +145,7 @@ def send_to_token():
         lines.append(f"💬 Комментарий: {comment}")
     if total:
         lines.append(f"💵 Сумма: {total} {currency}")
-    body_text = "\n".join(lines)
+    body_text = "\n".join(lines) if lines else "Сообщение"
 
     msg = messaging.Message(
         notification=messaging.Notification(title=title, body=body_text),
@@ -144,10 +168,15 @@ def send_to_token():
     return Response(json.dumps({"ok": True, "resp": resp}, ensure_ascii=False),
                     content_type="application/json; charset=utf-8")
 
+@app.get("/health")
+def health():
+    return Response("OK", content_type="text/plain; charset=utf-8")
+
 @app.get("/")
 def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
+    # Для локального запуска: python order_push_server.py
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
