@@ -57,7 +57,7 @@ def send_order():
     total = p.get("total", 0)
     currency = p.get("currency", "TJS")
 
-    title = "📦 Новый заказ"
+    title = "💼 Новый заказ"
     body  = format_body(customer, phone, comment, total, currency)
 
     try:
