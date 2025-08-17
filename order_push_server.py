@@ -67,9 +67,17 @@ def subscribe_token():
     token = p.get("token")
     if not token:
         return jsonify({"ok": False, "error": "no token"}), 400
-    res = messaging.subscribe_to_topic([token], "admin")
-    res_dict = getattr(res, '__dict__', {})
-    return jsonify({"ok": True, "res": res_dict}), 200
+    try:
+        res = messaging.subscribe_to_topic([token], "admin")
+        return jsonify({
+            "ok": True,
+            "successCount": res.success_count,
+            "failureCount": res.failure_count,
+            "errors": [str(e) for e in res.errors] if res.failure_count else []
+        }), 200
+    except Exception as e:
+        print("❌ Ошибка подписки:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.post("/send-to-token")
 def send_to_token():
@@ -80,16 +88,20 @@ def send_to_token():
     body  = p.get("body", "Привет!")
     if not token:
         return jsonify({"ok": False, "error": "no token"}), 400
-    msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body),
-        token=token,
-        android=messaging.AndroidConfig(
-            notification=messaging.AndroidNotification(channel_id="default_channel")
-        ),
-    )
-    resp = messaging.send(msg)
-    print("✅ FCM sent (token):", resp)
-    return jsonify({"ok": True, "resp": resp}), 200
+    try:
+        msg = messaging.Message(
+            notification=messaging.Notification(title=title, body=body),
+            token=token,
+            android=messaging.AndroidConfig(
+                notification=messaging.AndroidNotification(channel_id="default_channel")
+            ),
+        )
+        resp = messaging.send(msg)
+        print("✅ FCM sent (token):", resp)
+        return jsonify({"ok": True, "resp": resp}), 200
+    except Exception as e:
+        print("❌ Ошибка отправки токену:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.get("/")
 def root():
