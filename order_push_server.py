@@ -1,7 +1,7 @@
 import os
 import json
 import base64
-import threading  # можно оставить, но больше не используем для отправки
+import threading
 import concurrent.futures
 from flask import Flask, request, Response
 
@@ -9,10 +9,10 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 from firebase_admin._messaging_utils import UnregisteredError
 
-# Глобальный пул потоков для фоновых задач (держит рабочие потоки живыми)
+# --- Фоновый пул
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# --- Загрузка service account ---
+# --- Загрузка Firebase ключа
 def _load_firebase_cred():
     raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
@@ -25,16 +25,16 @@ def _load_firebase_cred():
     if os.path.exists("serviceAccountKey.json"):
         return credentials.Certificate("serviceAccountKey.json")
 
-    raise RuntimeError("Нет ключа Firebase (ENV или serviceAccountKey.json)")
+    raise RuntimeError("Нет ключа Firebase")
 
-# --- Инициализация Firebase ---
+# --- Инициализация Firebase
 if not firebase_admin._apps:
     cred = _load_firebase_cred()
     firebase_admin.initialize_app(cred)
 
 app = Flask(__name__)
 
-# --- Утилиты ---
+# --- Утилиты
 def first_nonempty(d: dict, *keys) -> str | None:
     for k in keys:
         v = d.get(k)
@@ -69,33 +69,22 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
     print("✅ FCM sent (topic=admin):", resp, flush=True)
     return resp
 
-# --- Роуты ---
+# --- Заказ
 @app.post("/send-order")
 def send_order():
     p = request.get_json(force=True, silent=True) or {}
     print("📥 /send-order payload:", p, flush=True)
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
-    customer = first_nonempty(
-        p,
-        "customerName", "customer_name", "name", "customer"
-    ) or "Клиент"
+    customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
 
-    # Расширенные ключи для телефона
-    phone_keys = [
-        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
-        "number", "tel", "contact"
-    ]
+    phone_keys = ["phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone", "number", "tel", "contact"]
     phone = first_nonempty(p, *phone_keys) or "—"
-    matched_key = next((k for k in phone_keys if str(p.get(k) or "").strip()), None)
-    print(f"ℹ️ phone matched_key={matched_key} value={phone}", flush=True)
-
     comment = first_nonempty(p, "comment", "comments", "remark", "note") or ""
     total = first_nonempty(p, "total", "sum", "amount") or ""
     currency = first_nonempty(p, "currency", "curr") or "TJS"
     title = "💼 Новый заказ"
 
-    # Отправляем пуш в фоне через пул потоков (надёжно)
     def push_job():
         try:
             msg_id = send_push_to_admin(
@@ -112,18 +101,12 @@ def send_order():
             print(f"❌ push error (background) [order_id={order_id}]: {e}", flush=True)
 
     EXECUTOR.submit(push_job)
-
-    # Сразу отвечаем клиенту
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
-    )
+    return Response(json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
 
 @app.post("/subscribe-token")
 def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /subscribe-token payload:", p, flush=True)
-
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
@@ -146,15 +129,12 @@ def subscribe_token():
         return Response(json.dumps({"ok": True, "res": out}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as ex:
-        print("❌ subscribe-token error:", ex, flush=True)
         return Response(json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
 @app.post("/send-to-token")
 def send_to_token():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-to-token payload:", p, flush=True)
-
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
@@ -162,17 +142,10 @@ def send_to_token():
 
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
-
-    phone = first_nonempty(
-        p,
-        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
-        "number", "tel", "contact"
-    ) or "—"
-
+    phone = first_nonempty(p, "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone", "number", "tel", "contact") or "—"
     comment = p.get("comment", "")
     total = str(p.get("total", ""))
     currency = p.get("currency", "TJS")
-
     body_text = format_body(customer, phone, comment, total, currency)
 
     def push_job():
@@ -195,11 +168,8 @@ def send_to_token():
             print("❌ send-to-token error (background):", e, flush=True)
 
     EXECUTOR.submit(push_job)
-
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
-    )
+    return Response(json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
@@ -209,8 +179,76 @@ def health():
 def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
+# === Products API ===
+PRODUCTS_FILE = "products.json"
+
+def load_products():
+    if os.path.exists(PRODUCTS_FILE):
+        with open(PRODUCTS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
+
+def save_products(products):
+    with open(PRODUCTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(products, f, ensure_ascii=False, indent=2)
+
+@app.get("/products")
+def get_products():
+    return Response(json.dumps(load_products(), ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
+
+@app.post("/products")
+def add_product():
+    p = request.get_json(force=True, silent=True) or {}
+    required = ["brand", "model", "quality", "price", "stock"]
+    if not all(k in p for k in required):
+        return Response(json.dumps({"ok": False, "error": "Missing fields"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
+    products = load_products()
+    new_product = {
+        "id": int(__import__('time').time()),
+        "brand": p["brand"],
+        "model": p["model"],
+        "quality": p["quality"],
+        "price": float(p["price"]),
+        "stock": int(p["stock"])
+    }
+    products.append(new_product)
+    save_products(products)
+    return Response(json.dumps({"ok": True, "product": new_product}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
+
+@app.put("/products/<int:pid>")
+def update_product(pid):
+    p = request.get_json(force=True, silent=True) or {}
+    products = load_products()
+    index = next((i for i, prod in enumerate(products) if prod["id"] == pid), -1)
+    if index == -1:
+        return Response(json.dumps({"ok": False, "error": "Product not found"}, ensure_ascii=False),
+                        status=404, content_type="application/json; charset=utf-8")
+    products[index].update({
+        "brand": p.get("brand", products[index]["brand"]),
+        "model": p.get("model", products[index]["model"]),
+        "quality": p.get("quality", products[index]["quality"]),
+        "price": float(p.get("price", products[index]["price"])),
+        "stock": int(p.get("stock", products[index]["stock"])),
+    })
+    save_products(products)
+    return Response(json.dumps({"ok": True, "product": products[index]}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
+
+@app.delete("/products/<int:pid>")
+def delete_product(pid):
+    products = load_products()
+    filtered = [p for p in products if p["id"] != pid]
+    if len(filtered) == len(products):
+        return Response(json.dumps({"ok": False, "error": "Product not found"}, ensure_ascii=False),
+                        status=404, content_type="application/json; charset=utf-8")
+    save_products(filtered)
+    return Response(json.dumps({"ok": True, "deleted_id": pid}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
+
+# --- Запуск сервера ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
-    # === Products API ===
-PRODUCTS_FILE = "products.json"
