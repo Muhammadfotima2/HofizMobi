@@ -1,7 +1,6 @@
 import os
 import json
 import base64
-import threading  # можно оставить, но больше не используем для отправки
 import concurrent.futures
 from flask import Flask, request, Response
 
@@ -9,10 +8,10 @@ import firebase_admin
 from firebase_admin import credentials, messaging
 from firebase_admin._messaging_utils import UnregisteredError
 
-# Глобальный пул потоков для фоновых задач (держит рабочие потоки живыми)
+# === Глобальный пул потоков для фоновых задач ===
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# --- Загрузка service account ---
+# === Загрузка service account ===
 def _load_firebase_cred():
     raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_B64")
@@ -27,14 +26,30 @@ def _load_firebase_cred():
 
     raise RuntimeError("Нет ключа Firebase (ENV или serviceAccountKey.json)")
 
-# --- Инициализация Firebase ---
+# === Инициализация Firebase ===
 if not firebase_admin._apps:
     cred = _load_firebase_cred()
     firebase_admin.initialize_app(cred)
 
 app = Flask(__name__)
 
-# --- Утилиты ---
+# === Файл заказов ===
+ORDERS_FILE = "orders.json"
+
+def load_orders():
+    if not os.path.exists(ORDERS_FILE):
+        return []
+    try:
+        with open(ORDERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_orders(orders):
+    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(orders, f, ensure_ascii=False, indent=2)
+
+# === Утилиты ===
 def first_nonempty(d: dict, *keys) -> str | None:
     for k in keys:
         v = d.get(k)
@@ -69,7 +84,7 @@ def send_push_to_admin(title: str, customer: str, phone: str, comment: str, tota
     print("✅ FCM sent (topic=admin):", resp, flush=True)
     return resp
 
-# --- Роуты ---
+# === Роуты ===
 @app.post("/send-order")
 def send_order():
     p = request.get_json(force=True, silent=True) or {}
@@ -95,7 +110,21 @@ def send_order():
     currency = first_nonempty(p, "currency", "curr") or "TJS"
     title = "💼 Новый заказ"
 
-    # Отправляем пуш в фоне через пул потоков (надёжно)
+    # === Сохраняем заказ в orders.json ===
+    orders = load_orders()
+    order = {
+        "orderId": order_id,
+        "customer": customer,
+        "phone": phone,
+        "comment": comment,
+        "total": total,
+        "currency": currency,
+    }
+    orders.append(order)
+    save_orders(orders)
+    print(f"💾 Заказ сохранён в {ORDERS_FILE} [order_id={order_id}]", flush=True)
+
+    # === Пуш админу (фоновой задачей) ===
     def push_job():
         try:
             msg_id = send_push_to_admin(
@@ -113,7 +142,6 @@ def send_order():
 
     EXECUTOR.submit(push_job)
 
-    # Сразу отвечаем клиенту
     return Response(
         json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
         content_type="application/json; charset=utf-8"
@@ -201,6 +229,15 @@ def send_to_token():
         content_type="application/json; charset=utf-8"
     )
 
+@app.get("/orders")
+def list_orders():
+    """Вернуть список заказов (для админки)"""
+    orders = load_orders()
+    return Response(
+        json.dumps(orders, ensure_ascii=False, indent=2),
+        content_type="application/json; charset=utf-8"
+    )
+
 @app.get("/health")
 def health():
     return Response("OK", content_type="text/plain; charset=utf-8")
@@ -212,5 +249,3 @@ def root():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False)
-    # === Products API ===
-PRODUCTS_FILE = "products.json"
