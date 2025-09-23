@@ -47,9 +47,7 @@ def first_nonempty(d: dict, *keys) -> str | None:
     return None
 
 def to_str(v) -> str:
-    if v is None:
-        return ""
-    return str(v)
+    return "" if v is None else str(v)
 
 def parse_total_number(v) -> float | None:
     if v is None:
@@ -58,10 +56,7 @@ def parse_total_number(v) -> float | None:
     if not s:
         return None
     s = s.replace("\u00A0", " ")
-    filtered = []
-    for ch in s:
-        if ch.isdigit() or ch in [".", ",", "-"]:
-            filtered.append(ch)
+    filtered = [ch for ch in s if ch.isdigit() or ch in [".", ",", "-"]]
     s = "".join(filtered)
     if not s:
         return None
@@ -76,12 +71,9 @@ def parse_total_number(v) -> float | None:
 
 def format_body(customer: str, phone: str, comment: str, total_text: str, currency: str) -> str:
     lines = []
-    if customer:
-        lines.append(f"👤 Имя: {customer}")
-    if phone:
-        lines.append(f"📞 Номер: {phone}")
-    if comment:
-        lines.append(f"💬 Комментарий: {comment}")
+    if customer: lines.append(f"👤 Имя: {customer}")
+    if phone: lines.append(f"📞 Номер: {phone}")
+    if comment: lines.append(f"💬 Комментарий: {comment}")
     lines.append(f"💵 Сумма: {total_text} {currency}")
     return "\n".join(lines)
 
@@ -97,7 +89,6 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
         "total": total_text,
         "currency": currency,
     }
-
     msg = messaging.Message(
         topic="admin",
         data=data_payload,
@@ -119,7 +110,6 @@ def send_order():
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
     customer = first_nonempty(p, "customerName", "name", "customer") or "Клиент"
-
     phone = first_nonempty(p, "phone", "phoneNumber", "customerPhone", "number") or "—"
     comment = to_str(first_nonempty(p, "comment", "note", "remark") or "")
     total_input = first_nonempty(p, "total", "sum", "amount")
@@ -129,7 +119,6 @@ def send_order():
     if total_num is None:
         return Response(json.dumps({"ok": False, "error": "total required"}, ensure_ascii=False),
                         status=400, content_type="application/json; charset=utf-8")
-
     total_text = str(total_input).strip() if total_input else str(total_num)
 
     try:
@@ -176,8 +165,23 @@ def subscribe_token():
         return Response(json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
+@app.get("/orders")
+def list_orders():
+    try:
+        docs = db.collection("orders").order_by("createdAt", direction=firestore.Query.DESCENDING).stream()
+        orders = [doc.to_dict() for doc in docs]
+        return Response(json.dumps(orders, ensure_ascii=False, indent=2),
+                        content_type="application/json; charset=utf-8")
+    except Exception as e:
+        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
+
 @app.get("/health")
 def health():
+    return Response("OK", content_type="text/plain; charset=utf-8")
+
+@app.get("/")
+def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
