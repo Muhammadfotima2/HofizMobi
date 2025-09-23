@@ -5,10 +5,10 @@ import concurrent.futures
 from flask import Flask, request, Response
 
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, firestore
 from firebase_admin._messaging_utils import UnregisteredError
 
-# === Глобальный пул потоков для фоновых задач ===
+# === Глобальный пул потоков ===
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 # === Загрузка service account ===
@@ -30,24 +30,9 @@ def _load_firebase_cred():
 if not firebase_admin._apps:
     cred = _load_firebase_cred()
     firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 app = Flask(__name__)
-
-# === Файл заказов ===
-ORDERS_FILE = "orders.json"
-
-def load_orders():
-    if not os.path.exists(ORDERS_FILE):
-        return []
-    try:
-        with open(ORDERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_orders(orders):
-    with open(ORDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(orders, f, ensure_ascii=False, indent=2)
 
 # === Утилиты ===
 def first_nonempty(d: dict, *keys) -> str | None:
@@ -77,7 +62,6 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
                        comment: str, total: str, currency: str):
     body_text = format_body(customer, phone, comment, total, currency)
 
-    # ВСЕ поля добавляем в data
     data_payload = {
         "orderId": str(order_id),
         "customer": customer,
@@ -121,20 +105,23 @@ def send_order():
     total = first_nonempty(p, "total", "sum", "amount") or ""
     currency = first_nonempty(p, "currency", "curr") or "TJS"
 
-    # Сохраняем заказ
-    orders = load_orders()
-    orders.append({
-        "orderId": order_id,
-        "customer": customer,
-        "phone": phone,
-        "comment": comment,
-        "total": total,
-        "currency": currency,
-    })
-    save_orders(orders)
-    print(f"💾 Заказ сохранён в {ORDERS_FILE} [order_id={order_id}]", flush=True)
+    # === Сохраняем заказ в Firestore ===
+    try:
+        doc_ref = db.collection("orders").document(str(order_id))
+        doc_ref.set({
+            "orderId": order_id,
+            "customer": customer,
+            "phone": phone,
+            "comment": comment,
+            "total": total,
+            "currency": currency,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        })
+        print(f"💾 Заказ сохранён в Firestore [order_id={order_id}]", flush=True)
+    except Exception as e:
+        print("❌ Ошибка сохранения заказа:", e, flush=True)
 
-    # Отправляем пуш фоном
+    # === Пуш админу (фоном) ===
     def push_job():
         try:
             msg_id = send_push_to_admin(order_id, customer, phone, comment, total, currency)
@@ -170,59 +157,17 @@ def subscribe_token():
         return Response(json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
-@app.post("/send-to-token")
-def send_to_token():
-    p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-to-token payload:", p, flush=True)
-    token = p.get("token")
-    if not token:
-        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
-                        status=400, content_type="application/json; charset=utf-8")
-
-    title = p.get("title", "Тест")
-    customer = p.get("customer", "—")
-    phone = first_nonempty(p, "phone", "phoneNumber", "phone_number", "number") or "—"
-    comment = p.get("comment", "")
-    total = str(p.get("total", ""))
-    currency = p.get("currency", "TJS")
-
-    body_text = format_body(customer, phone, comment, total, currency)
-
-    def push_job():
-        try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body_text),
-                token=token,
-                android=messaging.AndroidConfig(priority="high"),
-                data={
-                    "title": title,
-                    "body": body_text,
-                    "customer": customer,
-                    "phone": str(phone),
-                    "comment": comment,
-                    "total": str(total),
-                    "currency": currency,
-                },
-            )
-            resp = messaging.send(msg)
-            print(f"✅ FCM sent (to token): {resp}", flush=True)
-        except UnregisteredError as ue:
-            print("❌ Unregistered token:", ue, flush=True)
-        except Exception as e:
-            print("❌ send-to-token error:", e, flush=True)
-
-    EXECUTOR.submit(push_job)
-
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
-    )
-
 @app.get("/orders")
 def list_orders():
-    orders = load_orders()
-    return Response(json.dumps(orders, ensure_ascii=False, indent=2),
-                    content_type="application/json; charset=utf-8")
+    """Вернуть список заказов из Firestore"""
+    try:
+        docs = db.collection("orders").order_by("createdAt", direction=firestore.Query.DESCENDING).stream()
+        orders = [doc.to_dict() for doc in docs]
+        return Response(json.dumps(orders, ensure_ascii=False, indent=2),
+                        content_type="application/json; charset=utf-8")
+    except Exception as e:
+        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
