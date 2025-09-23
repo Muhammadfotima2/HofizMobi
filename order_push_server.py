@@ -72,12 +72,28 @@ def format_body(customer: str, phone: str, comment: str, total: str, currency: s
         lines.append(f"💵 Сумма: {total} {currency}")
     return "\n".join(lines) if lines else "Сообщение"
 
-def send_push_to_admin(title: str, customer: str, phone: str, comment: str, total: str, currency: str, data: dict | None = None):
+# === Отправка пуша админу ===
+def send_push_to_admin(order_id: str, customer: str, phone: str,
+                       comment: str, total: str, currency: str):
     body_text = format_body(customer, phone, comment, total, currency)
+
+    # ВСЕ поля добавляем в data
+    data_payload = {
+        "orderId": str(order_id),
+        "customer": customer,
+        "phone": phone,
+        "comment": comment,
+        "total": str(total),
+        "currency": currency,
+    }
+
     msg = messaging.Message(
-        notification=messaging.Notification(title=title, body=body_text),
+        notification=messaging.Notification(
+            title="💼 Новый заказ",
+            body=body_text
+        ),
         topic="admin",
-        data={k: str(v) for k, v in (data or {}).items()},
+        data=data_payload,
         android=messaging.AndroidConfig(priority="high"),
     )
     resp = messaging.send(msg)
@@ -91,12 +107,8 @@ def send_order():
     print("📥 /send-order payload:", p, flush=True)
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
-    customer = first_nonempty(
-        p,
-        "customerName", "customer_name", "name", "customer"
-    ) or "Клиент"
+    customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
 
-    # Расширенные ключи для телефона
     phone_keys = [
         "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
         "number", "tel", "contact"
@@ -108,37 +120,27 @@ def send_order():
     comment = first_nonempty(p, "comment", "comments", "remark", "note") or ""
     total = first_nonempty(p, "total", "sum", "amount") or ""
     currency = first_nonempty(p, "currency", "curr") or "TJS"
-    title = "💼 Новый заказ"
 
-    # === Сохраняем заказ в orders.json ===
+    # Сохраняем заказ
     orders = load_orders()
-    order = {
+    orders.append({
         "orderId": order_id,
         "customer": customer,
         "phone": phone,
         "comment": comment,
         "total": total,
         "currency": currency,
-    }
-    orders.append(order)
+    })
     save_orders(orders)
     print(f"💾 Заказ сохранён в {ORDERS_FILE} [order_id={order_id}]", flush=True)
 
-    # === Пуш админу (фоновой задачей) ===
+    # Отправляем пуш фоном
     def push_job():
         try:
-            msg_id = send_push_to_admin(
-                title=title,
-                customer=customer,
-                phone=phone,
-                comment=comment,
-                total=str(total),
-                currency=currency,
-                data={"orderId": order_id}
-            )
+            msg_id = send_push_to_admin(order_id, customer, phone, comment, total, currency)
             print(f"✅ push queued OK [order_id={order_id}] → msg_id={msg_id}", flush=True)
         except Exception as e:
-            print(f"❌ push error (background) [order_id={order_id}]: {e}", flush=True)
+            print(f"❌ push error [order_id={order_id}]: {e}", flush=True)
 
     EXECUTOR.submit(push_job)
 
@@ -151,7 +153,6 @@ def send_order():
 def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
     print("📥 /subscribe-token payload:", p, flush=True)
-
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
@@ -161,16 +162,7 @@ def subscribe_token():
         out = {
             "success_count": getattr(res, "success_count", 0),
             "failure_count": getattr(res, "failure_count", 0),
-            "errors": []
         }
-        errors = getattr(res, "errors", []) or []
-        for e in errors:
-            out["errors"].append({
-                "index": getattr(e, "index", None),
-                "reason": getattr(e, "reason", None),
-                "error_code": getattr(e, "error_code", None),
-                "message": str(e),
-            })
         return Response(json.dumps({"ok": True, "res": out}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as ex:
@@ -182,7 +174,6 @@ def subscribe_token():
 def send_to_token():
     p = request.get_json(force=True, silent=True) or {}
     print("📥 /send-to-token payload:", p, flush=True)
-
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
@@ -190,13 +181,7 @@ def send_to_token():
 
     title = p.get("title", "Тест")
     customer = p.get("customer", "—")
-
-    phone = first_nonempty(
-        p,
-        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
-        "number", "tel", "contact"
-    ) or "—"
-
+    phone = first_nonempty(p, "phone", "phoneNumber", "phone_number", "number") or "—"
     comment = p.get("comment", "")
     total = str(p.get("total", ""))
     currency = p.get("currency", "TJS")
@@ -210,17 +195,21 @@ def send_to_token():
                 token=token,
                 android=messaging.AndroidConfig(priority="high"),
                 data={
-                    "title": title, "body": body_text,
-                    "customer": customer, "phone": str(phone),
-                    "comment": comment, "total": str(total), "currency": currency
+                    "title": title,
+                    "body": body_text,
+                    "customer": customer,
+                    "phone": str(phone),
+                    "comment": comment,
+                    "total": str(total),
+                    "currency": currency,
                 },
             )
             resp = messaging.send(msg)
-            print(f"✅ FCM sent (to token) → msg_id={resp}", flush=True)
+            print(f"✅ FCM sent (to token): {resp}", flush=True)
         except UnregisteredError as ue:
             print("❌ Unregistered token:", ue, flush=True)
         except Exception as e:
-            print("❌ send-to-token error (background):", e, flush=True)
+            print("❌ send-to-token error:", e, flush=True)
 
     EXECUTOR.submit(push_job)
 
@@ -231,12 +220,9 @@ def send_to_token():
 
 @app.get("/orders")
 def list_orders():
-    """Вернуть список заказов (для админки)"""
     orders = load_orders()
-    return Response(
-        json.dumps(orders, ensure_ascii=False, indent=2),
-        content_type="application/json; charset=utf-8"
-    )
+    return Response(json.dumps(orders, ensure_ascii=False, indent=2),
+                    content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
