@@ -25,7 +25,7 @@ def _load_firebase_cred():
     if os.path.exists("serviceAccountKey.json"):
         return credentials.Certificate("serviceAccountKey.json")
 
-    raise RuntimeError("Нет ключа Firebase (ENV или serviceAccountKey.json)")
+    raise RuntimeError("Missing FIREBASE_SERVICE_ACCOUNT and serviceAccountKey.json")
 
 # === Инициализация Firebase ===
 if not firebase_admin._apps:
@@ -68,14 +68,6 @@ def parse_total_number(v) -> float | None:
         return float(s)
     except ValueError:
         return None
-
-def format_body(customer: str, phone: str, comment: str, total_text: str, currency: str) -> str:
-    lines = []
-    if customer: lines.append(f"👤 Имя: {customer}")
-    if phone: lines.append(f"📞 Номер: {phone}")
-    if comment: lines.append(f"💬 Комментарий: {comment}")
-    lines.append(f"💵 Сумма: {total_text} {currency}")
-    return "\n".join(lines)
 
 # === Отправка пуша админу (только DATA) ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
@@ -184,6 +176,7 @@ def health():
 def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
+# === Запуск ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="127.0.0.1", port=port, debug=False)
