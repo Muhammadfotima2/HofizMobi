@@ -120,7 +120,7 @@ def send_order():
         total = "0"
     currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
 
-    # === Сохраняем заказ в Firestore (обязательно статус new) ===
+    # === Сохраняем заказ в Firestore (обязательно статус new и userId=system) ===
     try:
         doc_ref = db.collection("orders").document(str(order_id))
         order_doc = {
@@ -131,7 +131,8 @@ def send_order():
             "total": total,
             "currency": currency,
             "createdAt": firestore.SERVER_TIMESTAMP,
-            "status": "new",  # 👈 ключевое поле для админ-экрана
+            "status": "new",      # 👈 ключевое поле для админ-экрана
+            "userId": "system",   # 👈 чтобы пройти правило allow create
         }
         doc_ref.set(order_doc)
         print(f"💾 Order saved to Firestore [order_id={order_id}] → {order_doc}", flush=True)
