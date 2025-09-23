@@ -52,39 +52,23 @@ def to_str(v) -> str:
     return str(v)
 
 def parse_total_number(v) -> float | None:
-    """
-    Парсит сумму в число.
-    Поддерживает форматы:
-    - 1234.56
-    - 1,234.56
-    - 1 234,56
-    - "1 234,56 TJS" и т.п.
-    Возвращает float или None (если не получилось распарсить).
-    """
     if v is None:
         return None
     s = str(v).strip()
     if not s:
         return None
-
-    s = s.replace("\u00A0", " ")  # nbsp
+    s = s.replace("\u00A0", " ")
     filtered = []
     for ch in s:
         if ch.isdigit() or ch in [".", ",", "-"]:
             filtered.append(ch)
-        elif ch == " ":
-            continue
     s = "".join(filtered)
-
     if not s:
         return None
-
     if "." in s and "," in s:
         s = s.replace(",", "")
-    else:
-        if "," in s and "." not in s:
-            s = s.replace(",", ".")
-
+    elif "," in s and "." not in s:
+        s = s.replace(",", ".")
     try:
         return float(s)
     except ValueError:
@@ -101,13 +85,11 @@ def format_body(customer: str, phone: str, comment: str, total_text: str, curren
     lines.append(f"💵 Сумма: {total_text} {currency}")
     return "\n".join(lines)
 
-# === Отправка пуша админу (Только DATA) ===
+# === Отправка пуша админу (только DATA) ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
                        comment: str, total_text: str, currency: str):
-    title = "💼 Новый заказ"
-
     data_payload = {
-        "title": title,
+        "title": "💼 Новый заказ",
         "orderId": str(order_id),
         "customer": customer,
         "phone": phone,
@@ -121,14 +103,9 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
         data=data_payload,
         android=messaging.AndroidConfig(
             priority="high",
-            notification=messaging.AndroidNotification(
-                channel_id="orders_high"  # должен совпадать с клиентом
-            ),
+            notification=messaging.AndroidNotification(channel_id="orders_high"),
         ),
-        # (необязательно) для iOS фореграунд
-        apns=messaging.APNSConfig(
-            headers={"apns-priority": "10"}
-        ),
+        apns=messaging.APNSConfig(headers={"apns-priority": "10"}),
     )
     resp = messaging.send(msg)
     print(f"✅ FCM sent (topic=admin): {resp} | data={data_payload}", flush=True)
@@ -141,31 +118,20 @@ def send_order():
     print("📥 /send-order payload:", p, flush=True)
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
-    customer = first_nonempty(p, "customerName", "customer_name", "name", "customer") or "Клиент"
+    customer = first_nonempty(p, "customerName", "name", "customer") or "Клиент"
 
-    phone_keys = [
-        "phone", "phoneNumber", "phone_number", "customerPhone", "customer_phone",
-        "number", "tel", "contact"
-    ]
-    phone = first_nonempty(p, *phone_keys) or "—"
-    matched_key = next((k for k in phone_keys if str(p.get(k) or "").strip()), None)
-    print(f"ℹ️ phone matched_key={matched_key} value={phone}", flush=True)
-
-    comment     = to_str(first_nonempty(p, "comment", "comments", "remark", "note") or "")
+    phone = first_nonempty(p, "phone", "phoneNumber", "customerPhone", "number") or "—"
+    comment = to_str(first_nonempty(p, "comment", "note", "remark") or "")
     total_input = first_nonempty(p, "total", "sum", "amount")
-    currency    = to_str(first_nonempty(p, "currency", "curr") or "TJS")
+    currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
 
-    # --- Валидируем и парсим сумму как ЧИСЛО ---
     total_num = parse_total_number(total_input)
     if total_num is None:
-        return Response(
-            json.dumps({"ok": False, "error": "total is required and must be a number"}, ensure_ascii=False),
-            status=400, content_type="application/json; charset=utf-8"
-        )
-    # Текстовая версия для пуша/отображения
-    total_text = str(total_input).strip() if total_input is not None else f"{total_num}"
+        return Response(json.dumps({"ok": False, "error": "total required"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
 
-    # === Сохраняем заказ в Firestore ===
+    total_text = str(total_input).strip() if total_input else str(total_num)
+
     try:
         doc_ref = db.collection("orders").document(str(order_id))
         order_doc = {
@@ -177,122 +143,41 @@ def send_order():
             "createdAt": firestore.SERVER_TIMESTAMP,
             "status": "new",
             "userId": "system",
-            "total": total_num,       # Number
-            "totalText": total_text,  # Текстовая копия (необязательно)
+            "total": total_num,
+            "totalText": total_text,
         }
         doc_ref.set(order_doc)
-        print(f"💾 Order saved to Firestore [order_id={order_id}] → {order_doc}", flush=True)
+        print(f"💾 Order saved [id={order_id}] → {order_doc}", flush=True)
     except Exception as e:
         print("❌ Firestore save error:", e, flush=True)
 
-    # === Пуш админу (фоном) ===
     def push_job():
         try:
-            msg_id = send_push_to_admin(order_id, customer, phone, comment, total_text, currency)
-            print(f"✅ push queued OK [order_id={order_id}] → msg_id={msg_id}", flush=True)
+            send_push_to_admin(order_id, customer, phone, comment, total_text, currency)
         except Exception as e:
-            print(f"❌ push error [order_id={order_id}]: {e}", flush=True)
+            print(f"❌ push error: {e}", flush=True)
 
     EXECUTOR.submit(push_job)
-
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
-    )
+    return Response(json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
 
 @app.post("/subscribe-token")
 def subscribe_token():
     p = request.get_json(force=True, silent=True) or {}
-    print("📥 /subscribe-token payload:", p, flush=True)
     token = p.get("token")
     if not token:
         return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
                         status=400, content_type="application/json; charset=utf-8")
     try:
         res = messaging.subscribe_to_topic([token], "admin")
-        out = {
-            "success_count": getattr(res, "success_count", 0),
-            "failure_count": getattr(res, "failure_count", 0),
-        }
-        return Response(json.dumps({"ok": True, "res": out}, ensure_ascii=False),
+        return Response(json.dumps({"ok": True, "res": {"success": res.success_count}}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
     except Exception as ex:
-        print("❌ subscribe-token error:", ex, flush=True)
         return Response(json.dumps({"ok": False, "error": str(ex)}, ensure_ascii=False),
-                        status=500, content_type="application/json; charset=utf-8")
-
-@app.post("/send-to-token")
-def send_to_token():
-    p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-to-token payload:", p, flush=True)
-
-    token = p.get("token")
-    if not token:
-        return Response(json.dumps({"ok": False, "error": "no token"}, ensure_ascii=False),
-                        status=400, content_type="application/json; charset=utf-8")
-
-    title    = to_str(p.get("title", "Тест"))
-    customer = to_str(p.get("customer", "—"))
-    phone    = to_str(first_nonempty(p, "phone", "phoneNumber", "phone_number", "number") or "—")
-    comment  = to_str(p.get("comment", ""))
-    total_in = first_nonempty(p, "total", "sum", "amount")
-    currency = to_str(p.get("currency", "TJS"))
-
-    total_text = to_str(total_in or "")
-
-    # Тестовый пуш тоже отправляем ТОЛЬКО data
-    msg = messaging.Message(
-        token=token,
-        data={
-            "title": title,
-            "orderId": "test",
-            "customer": customer,
-            "phone": phone,
-            "comment": comment,
-            "total": total_text or "0",
-            "currency": currency,
-        },
-        android=messaging.AndroidConfig(
-            priority="high",
-            notification=messaging.AndroidNotification(channel_id="orders_high"),
-        ),
-        apns=messaging.APNSConfig(headers={"apns-priority": "10"}),
-    )
-
-    def push_job():
-        try:
-            resp = messaging.send(msg)
-            print(f"✅ FCM sent (to token): {resp}", flush=True)
-        except UnregisteredError as ue:
-            print("❌ Unregistered token:", ue, flush=True)
-        except Exception as e:
-            print("❌ send-to-token error:", e, flush=True)
-
-    EXECUTOR.submit(push_job)
-
-    return Response(
-        json.dumps({"ok": True, "queued": True}, ensure_ascii=False),
-        content_type="application/json; charset=utf-8"
-    )
-
-@app.get("/orders")
-def list_orders():
-    """Вернуть список заказов из Firestore"""
-    try:
-        docs = db.collection("orders").order_by("createdAt", direction=firestore.Query.DESCENDING).stream()
-        orders = [doc.to_dict() for doc in docs]
-        return Response(json.dumps(orders, ensure_ascii=False, indent=2),
-                        content_type="application/json; charset=utf-8")
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
 @app.get("/health")
 def health():
-    return Response("OK", content_type="text/plain; charset=utf-8")
-
-@app.get("/")
-def root():
     return Response("OK", content_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
