@@ -46,12 +46,58 @@ def first_nonempty(d: dict, *keys) -> str | None:
     return None
 
 def to_str(v) -> str:
-    # Нормализуем числа/None к строке, чтобы "0" не терялась
     if v is None:
         return ""
     return str(v)
 
-def format_body(customer: str, phone: str, comment: str, total: str, currency: str) -> str:
+def parse_total_number(v) -> float | None:
+    """
+    Парсит сумму в число.
+    Поддерживает форматы:
+    - 1234.56
+    - 1,234.56
+    - 1 234,56
+    - "1 234,56 TJS" и т.п.
+    Возвращает float или None (если не получилось распарсить).
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+
+    # Убираем валюты/буквы и неразрывные пробелы
+    s = s.replace("\u00A0", " ")  # nbsp
+    # Сохраним только цифры, точки, запятые и минус
+    filtered = []
+    for ch in s:
+        if ch.isdigit() or ch in [".", ",", "-"]:
+            filtered.append(ch)
+        elif ch == " ":
+            continue
+        # игнорируем остальные символы (валюта и т.д.)
+    s = "".join(filtered)
+
+    if not s:
+        return None
+
+    # Если есть и точка, и запятая — считаем, что запятая = разделитель тысяч, точка = десятичная
+    if "." in s and "," in s:
+        s = s.replace(",", "")
+    else:
+        # Если только запятая — считаем её десятичной и заменяем на точку
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+
+        # Если только точки — оставляем как есть (точка десятичная)
+        # Если вообще нет разделителей — оставляем как есть
+
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def format_body(customer: str, phone: str, comment: str, total_text: str, currency: str) -> str:
     lines = []
     if customer:
         lines.append(f"👤 Имя: {customer}")
@@ -59,15 +105,14 @@ def format_body(customer: str, phone: str, comment: str, total: str, currency: s
         lines.append(f"📞 Номер: {phone}")
     if comment:
         lines.append(f"💬 Комментарий: {comment}")
-    # total может быть "0" — тоже показываем
-    lines.append(f"💵 Сумма: {total} {currency}")
+    lines.append(f"💵 Сумма: {total_text} {currency}")
     return "\n".join(lines)
 
 # === Отправка пуша админу ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
-                       comment: str, total: str, currency: str):
+                       comment: str, total_text: str, currency: str):
     title = "💼 Новый заказ"
-    body_text = format_body(customer, phone, comment, total, currency)
+    body_text = format_body(customer, phone, comment, total_text, currency)
 
     data_payload = {
         "title": title,
@@ -75,7 +120,7 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
         "customer": customer,
         "phone": phone,
         "comment": comment,
-        "total": total,
+        "total": total_text,
         "currency": currency,
     }
 
@@ -114,13 +159,21 @@ def send_order():
     matched_key = next((k for k in phone_keys if str(p.get(k) or "").strip()), None)
     print(f"ℹ️ phone matched_key={matched_key} value={phone}", flush=True)
 
-    comment  = to_str(first_nonempty(p, "comment", "comments", "remark", "note") or "")
-    total    = to_str(first_nonempty(p, "total", "sum", "amount"))
-    if total == "":  # гарантируем хотя бы "0"
-        total = "0"
-    currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
+    comment     = to_str(first_nonempty(p, "comment", "comments", "remark", "note") or "")
+    total_input = first_nonempty(p, "total", "sum", "amount")
+    currency    = to_str(first_nonempty(p, "currency", "curr") or "TJS")
 
-    # === Сохраняем заказ в Firestore (обязательно статус new и userId=system) ===
+    # --- Валидируем и парсим сумму как ЧИСЛО ---
+    total_num = parse_total_number(total_input)
+    if total_num is None:
+        return Response(
+            json.dumps({"ok": False, "error": "total is required and must be a number"}, ensure_ascii=False),
+            status=400, content_type="application/json; charset=utf-8"
+        )
+    # Текстовая версия для пуша/отображения (сохраним исходник, если был; иначе форматируем число)
+    total_text = str(total_input).strip() if total_input is not None else f"{total_num}"
+
+    # === Сохраняем заказ в Firestore (status=new, userId=system, total как Number) ===
     try:
         doc_ref = db.collection("orders").document(str(order_id))
         order_doc = {
@@ -128,11 +181,12 @@ def send_order():
             "customer": customer,
             "phone": phone,
             "comment": comment,
-            "total": total,
             "currency": currency,
             "createdAt": firestore.SERVER_TIMESTAMP,
             "status": "new",      # 👈 ключевое поле для админ-экрана
             "userId": "system",   # 👈 чтобы пройти правило allow create
+            "total": total_num,   # 👈 ВАЖНО: число (Number), не строка
+            "totalText": total_text,  # для удобного отображения (необязательное поле)
         }
         doc_ref.set(order_doc)
         print(f"💾 Order saved to Firestore [order_id={order_id}] → {order_doc}", flush=True)
@@ -142,7 +196,7 @@ def send_order():
     # === Пуш админу (фоном) ===
     def push_job():
         try:
-            msg_id = send_push_to_admin(order_id, customer, phone, comment, total, currency)
+            msg_id = send_push_to_admin(order_id, customer, phone, comment, total_text, currency)
             print(f"✅ push queued OK [order_id={order_id}] → msg_id={msg_id}", flush=True)
         except Exception as e:
             print(f"❌ push error [order_id={order_id}]: {e}", flush=True)
@@ -189,10 +243,13 @@ def send_to_token():
     customer = to_str(p.get("customer", "—"))
     phone    = to_str(first_nonempty(p, "phone", "phoneNumber", "phone_number", "number") or "—")
     comment  = to_str(p.get("comment", ""))
-    total    = to_str(p.get("total", "0"))
+    total_in = first_nonempty(p, "total", "sum", "amount")
     currency = to_str(p.get("currency", "TJS"))
 
-    body_text = format_body(customer, phone, comment, total, currency)
+    # В пуш пойдёт текстовая сумма (без строгой валидации — это просто уведомление)
+    total_text = to_str(total_in or "")
+
+    body_text = format_body(customer, phone, comment, total_text or "0", currency)
 
     def push_job():
         try:
@@ -209,7 +266,7 @@ def send_to_token():
                     "customer": customer,
                     "phone": phone,
                     "comment": comment,
-                    "total": total,
+                    "total": total_text or "0",
                     "currency": currency,
                 },
             )
