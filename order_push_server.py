@@ -1,3 +1,4 @@
+# order_push_server.py
 import os
 import json
 import base64
@@ -66,31 +67,23 @@ def parse_total_number(v) -> float | None:
     if not s:
         return None
 
-    # Убираем валюты/буквы и неразрывные пробелы
     s = s.replace("\u00A0", " ")  # nbsp
-    # Сохраним только цифры, точки, запятые и минус
     filtered = []
     for ch in s:
         if ch.isdigit() or ch in [".", ",", "-"]:
             filtered.append(ch)
         elif ch == " ":
             continue
-        # игнорируем остальные символы (валюта и т.д.)
     s = "".join(filtered)
 
     if not s:
         return None
 
-    # Если есть и точка, и запятая — считаем, что запятая = разделитель тысяч, точка = десятичная
     if "." in s and "," in s:
         s = s.replace(",", "")
     else:
-        # Если только запятая — считаем её десятичной и заменяем на точку
         if "," in s and "." not in s:
             s = s.replace(",", ".")
-
-        # Если только точки — оставляем как есть (точка десятичная)
-        # Если вообще нет разделителей — оставляем как есть
 
     try:
         return float(s)
@@ -108,11 +101,10 @@ def format_body(customer: str, phone: str, comment: str, total_text: str, curren
     lines.append(f"💵 Сумма: {total_text} {currency}")
     return "\n".join(lines)
 
-# === Отправка пуша админу ===
+# === Отправка пуша админу (Только DATA) ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
                        comment: str, total_text: str, currency: str):
     title = "💼 Новый заказ"
-    body_text = format_body(customer, phone, comment, total_text, currency)
 
     data_payload = {
         "title": title,
@@ -125,10 +117,6 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
     }
 
     msg = messaging.Message(
-        notification=messaging.Notification(
-            title=title,
-            body=body_text
-        ),
         topic="admin",
         data=data_payload,
         android=messaging.AndroidConfig(
@@ -136,6 +124,10 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
             notification=messaging.AndroidNotification(
                 channel_id="orders_high"  # должен совпадать с клиентом
             ),
+        ),
+        # (необязательно) для iOS фореграунд
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10"}
         ),
     )
     resp = messaging.send(msg)
@@ -170,10 +162,10 @@ def send_order():
             json.dumps({"ok": False, "error": "total is required and must be a number"}, ensure_ascii=False),
             status=400, content_type="application/json; charset=utf-8"
         )
-    # Текстовая версия для пуша/отображения (сохраним исходник, если был; иначе форматируем число)
+    # Текстовая версия для пуша/отображения
     total_text = str(total_input).strip() if total_input is not None else f"{total_num}"
 
-    # === Сохраняем заказ в Firestore (status=new, userId=system, total как Number) ===
+    # === Сохраняем заказ в Firestore ===
     try:
         doc_ref = db.collection("orders").document(str(order_id))
         order_doc = {
@@ -183,10 +175,10 @@ def send_order():
             "comment": comment,
             "currency": currency,
             "createdAt": firestore.SERVER_TIMESTAMP,
-            "status": "new",      # 👈 ключевое поле для админ-экрана
-            "userId": "system",   # 👈 чтобы пройти правило allow create
-            "total": total_num,   # 👈 ВАЖНО: число (Number), не строка
-            "totalText": total_text,  # для удобного отображения (необязательное поле)
+            "status": "new",
+            "userId": "system",
+            "total": total_num,       # Number
+            "totalText": total_text,  # Текстовая копия (необязательно)
         }
         doc_ref.set(order_doc)
         print(f"💾 Order saved to Firestore [order_id={order_id}] → {order_doc}", flush=True)
@@ -246,30 +238,29 @@ def send_to_token():
     total_in = first_nonempty(p, "total", "sum", "amount")
     currency = to_str(p.get("currency", "TJS"))
 
-    # В пуш пойдёт текстовая сумма (без строгой валидации — это просто уведомление)
     total_text = to_str(total_in or "")
 
-    body_text = format_body(customer, phone, comment, total_text or "0", currency)
+    # Тестовый пуш тоже отправляем ТОЛЬКО data
+    msg = messaging.Message(
+        token=token,
+        data={
+            "title": title,
+            "orderId": "test",
+            "customer": customer,
+            "phone": phone,
+            "comment": comment,
+            "total": total_text or "0",
+            "currency": currency,
+        },
+        android=messaging.AndroidConfig(
+            priority="high",
+            notification=messaging.AndroidNotification(channel_id="orders_high"),
+        ),
+        apns=messaging.APNSConfig(headers={"apns-priority": "10"}),
+    )
 
     def push_job():
         try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body_text),
-                token=token,
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(channel_id="orders_high"),
-                ),
-                data={
-                    "title": title,
-                    "orderId": "test",
-                    "customer": customer,
-                    "phone": phone,
-                    "comment": comment,
-                    "total": total_text or "0",
-                    "currency": currency,
-                },
-            )
             resp = messaging.send(msg)
             print(f"✅ FCM sent (to token): {resp}", flush=True)
         except UnregisteredError as ue:
