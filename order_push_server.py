@@ -158,6 +158,8 @@ def send_order():
     comment  = to_str(first_nonempty(p, "comment", "note", "remark") or "")
     currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
     fcmToken = to_str(p.get("fcmToken") or "").strip()  # клиентский FCM
+    # --- ДОБАВЛЕНО ДЛЯ ПРАВИЛ: userId (для чтения клиентом и допуска create по правилам)
+    user_id  = first_nonempty(p, "uid", "userId") or "system"
 
     items = _normalize_items(p.get("items"))
     total_input = first_nonempty(p, "total", "sum", "amount")
@@ -188,6 +190,8 @@ def send_order():
             "status": "new",
             "total": total_num,
             "totalText": total_text,
+            # --- ДОБАВЛЕНО ДЛЯ ПРАВИЛ: userId (совместимо с твоими правилами)
+            "userId": user_id,
         }
         if fcmToken:
             order_doc["fcmToken"] = fcmToken
