@@ -185,11 +185,11 @@ def send_order():
 def _status_title_and_body(status: str) -> Dict[str, str]:
     s = status.lower().strip()
     if s == "progress":
-        return {"title": "🛠️ Заказ в работе", "body": "Ваш заказ принят и уже выполняется."}
+        return {"title": "⚙️ Заказ в работе", "body": "Мы приняли ваш заказ, он уже в работе 🚀"}
     if s == "done":
-        return {"title": "✅ Заказ готов", "body": "Ваш заказ готов. Свяжитесь с продавцом."}
+        return {"title": "🎁 Заказ готов", "body": "Ура! Ваш заказ готов 🎉 Свяжитесь с продавцом."}
     if s == "canceled":
-        return {"title": "⚠️ Заказ отменён", "body": "К сожалению, ваш заказ был отменён."}
+        return {"title": "💔 Заказ отменён", "body": "Очень жаль 😔 Ваш заказ был отменён."}
     return {"title": "ℹ️ Статус обновлён", "body": "Статус вашего заказа был обновлён."}
 
 def _send_push_to_customer_tokens(tokens: List[str], data: Dict[str, str]) -> None:
@@ -276,6 +276,7 @@ def update_order_status():
             title_body = _status_title_and_body(status)
             data_payload = {
                 "title": title_body["title"],
+                "body": title_body["body"],
                 "status": status,
                 "orderId": str(order_id),
                 "total": total_text,
