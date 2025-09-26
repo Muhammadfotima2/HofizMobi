@@ -181,6 +181,115 @@ def send_order():
     return Response(json.dumps({"ok": True, "orderId": order_id}, ensure_ascii=False),
                     content_type="application/json; charset=utf-8")
 
+# === ДОБАВЛЕНО: Push клиенту при смене статуса ===
+def _status_title_and_body(status: str) -> Dict[str, str]:
+    s = status.lower().strip()
+    if s == "progress":
+        return {"title": "🛠️ Заказ в работе", "body": "Ваш заказ принят и уже выполняется."}
+    if s == "done":
+        return {"title": "✅ Заказ готов", "body": "Ваш заказ готов. Свяжитесь с продавцом."}
+    if s == "canceled":
+        return {"title": "⚠️ Заказ отменён", "body": "К сожалению, ваш заказ был отменён."}
+    return {"title": "ℹ️ Статус обновлён", "body": "Статус вашего заказа был обновлён."}
+
+def _send_push_to_customer_tokens(tokens: List[str], data: Dict[str, str]) -> None:
+    if not tokens:
+        print("ℹ️ Нет токенов клиента для отправки.", flush=True)
+        return
+    # Отправляем DATA-only (как в клиенте)
+    for t in tokens:
+        try:
+            msg = messaging.Message(token=t, data=data)
+            resp = messaging.send(msg)
+            print(f"📤 FCM to user token={t[:12]}… ok={resp}", flush=True)
+        except Exception as e:
+            print(f"❌ FCM send error for token={t[:12]}…: {e}", flush=True)
+
+def _collect_user_tokens_by_email(email: str) -> List[str]:
+    if not email:
+        return []
+    try:
+        q = db.collection("users").where("email", "==", email).limit(1).get()
+        if not q:
+            return []
+        user_doc = q[0]
+        tokens_snap = db.collection("users").document(user_doc.id)\
+                        .collection("deviceTokens").stream()
+        tokens: List[str] = []
+        for d in tokens_snap:
+            tok = (d.to_dict() or {}).get("token")
+            if isinstance(tok, str) and tok.strip():
+                tokens.append(tok.strip())
+        return tokens
+    except Exception as e:
+        print("❌ collect tokens by email error:", e, flush=True)
+        return []
+
+@app.post("/update-order-status")
+def update_order_status():
+    """
+    Ожидает JSON:
+    {
+      "orderId": "...",           # обязательно
+      "status": "progress|done|canceled",
+      "notifyCustomer": true      # опц., по умолчанию true
+    }
+    Обновляет статус в /orders/{orderId} и, если notifyCustomer=true,
+    отправляет пуш клиенту (по email из заказа).
+    """
+    p = request.get_json(force=True, silent=True) or {}
+    print("🔄 /update-order-status payload:", p, flush=True)
+
+    order_id = first_nonempty(p, "orderId", "id")
+    status = (first_nonempty(p, "status") or "").lower()
+    notify_customer = (p.get("notifyCustomer", True) is True)
+
+    if not order_id or status not in {"progress", "done", "canceled"}:
+        return Response(json.dumps({"ok": False, "error": "orderId and valid status required"}, ensure_ascii=False),
+                        status=400, content_type="application/json; charset=utf-8")
+
+    try:
+        doc_ref = db.collection("orders").document(str(order_id))
+        snap = doc_ref.get()
+        if not snap.exists:
+            return Response(json.dumps({"ok": False, "error": "order not found"}, ensure_ascii=False),
+                            status=404, content_type="application/json; charset=utf-8")
+
+        update_fields: Dict[str, Any] = {"status": status}
+        if status == "done":
+            update_fields["doneAt"] = firestore.SERVER_TIMESTAMP
+        if status == "canceled":
+            update_fields["canceledAt"] = firestore.SERVER_TIMESTAMP
+        if status == "progress":
+            update_fields["progressAt"] = firestore.SERVER_TIMESTAMP
+
+        doc_ref.set(update_fields, merge=True)
+        print(f"📝 Order [{order_id}] status → {status}", flush=True)
+
+        if notify_customer:
+            order = snap.to_dict() or {}
+            email = to_str(order.get("email"))
+            total_text = to_str(order.get("totalText") or order.get("total") or "")
+            currency = to_str(order.get("currency") or "TJS")
+
+            tokens = _collect_user_tokens_by_email(email)
+            title_body = _status_title_and_body(status)
+            data_payload = {
+                "title": title_body["title"],
+                "status": status,
+                "orderId": str(order_id),
+                "total": total_text,
+                "currency": currency,
+            }
+            EXECUTOR.submit(lambda: _send_push_to_customer_tokens(tokens, data_payload))
+
+        return Response(json.dumps({"ok": True, "orderId": order_id, "status": status}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
+    except Exception as e:
+        print("❌ update status error:", e, flush=True)
+        return Response(json.dumps({"ok": False, "error": "update failed"}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
+
 @app.get("/health")
 def health():
     return Response("OK", content_type="text/plain; charset=utf-8")
