@@ -8,6 +8,7 @@ from flask import Flask, request, Response
 
 import firebase_admin
 from firebase_admin import credentials, messaging, firestore
+from flask_cors import CORS  # ✅ добавлено для CORS
 
 # === Пул потоков для фоновых задач ===
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -32,6 +33,7 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # ✅ разрешаем CORS для всех роутов
 
 # === Утилиты ===
 def first_nonempty(d: Dict[str, Any], *keys) -> Optional[str]:
@@ -177,6 +179,7 @@ def send_order():
         return Response(json.dumps({"ok": False, "error": "firestore save failed"}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
+    # ⬇️ На создании заказа пуш уходит ТОЛЬКО админу (клиенту не шлём здесь)
     EXECUTOR.submit(lambda: send_push_to_admin(order_id, customer, phone, comment, total_text, currency))
     return Response(json.dumps({"ok": True, "orderId": order_id}, ensure_ascii=False),
                     content_type="application/json; charset=utf-8")
