@@ -8,7 +8,7 @@ from flask import Flask, request, Response
 
 import firebase_admin
 from firebase_admin import credentials, messaging, firestore
-from flask_cors import CORS  # ✅ добавлено для CORS
+from flask_cors import CORS  # CORS для всех роутов
 
 # === Пул потоков для фоновых задач ===
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -33,7 +33,7 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # ✅ разрешаем CORS для всех роутов
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # === Утилиты ===
 def first_nonempty(d: Dict[str, Any], *keys) -> Optional[str]:
@@ -109,22 +109,41 @@ def _compute_total_from_items(items: List[Dict[str, Any]]) -> float:
         s += float(it.get("price", 0.0)) * float(it.get("qty", 1.0))
     return _num_currency(s)
 
-# === Push админу (DATA-only) ===
+# === Отправка пуша админу (DATA-only) ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
                        comment: str, total_text: str, currency: str):
     data_payload = {
         "title": "💼 Новый заказ",
         "orderId": str(order_id),
-        "customer": customer,
-        "phone": phone,
-        "comment": comment,
-        "total": total_text,
-        "currency": currency,
+        "customer": to_str(customer),
+        "phone": to_str(phone),
+        "comment": to_str(comment),
+        "total": to_str(total_text),
+        "currency": to_str(currency),
     }
     msg = messaging.Message(topic="admin", data=data_payload)
     resp = messaging.send(msg)
     print(f"✅ FCM sent (topic=admin): {resp} | data={data_payload}", flush=True)
     return resp
+
+# === Роут: регистрация токена (по вызову из клиента) ===
+@app.post("/subscribe-token")
+def subscribe_token():
+    try:
+        p = request.get_json(force=True, silent=True) or {}
+        token = to_str(p.get("token")).strip()
+        uid = to_str(p.get("uid")).strip()
+        if not token:
+            return Response(json.dumps({"ok": False, "error": "token required"}, ensure_ascii=False),
+                            status=400, content_type="application/json; charset=utf-8")
+        # Здесь можно (опционально) что-то логировать/валидировать
+        print(f"🔗 subscribe-token ← uid={uid or '—'} token={token[:12]}…", flush=True)
+        return Response(json.dumps({"ok": True}, ensure_ascii=False),
+                        content_type="application/json; charset=utf-8")
+    except Exception as e:
+        print("❌ subscribe-token error:", e, flush=True)
+        return Response(json.dumps({"ok": False, "error": "subscribe failed"}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
 
 # === Роут /send-order ===
 @app.post("/send-order")
@@ -134,11 +153,11 @@ def send_order():
 
     order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
     customer = first_nonempty(p, "customerName", "name", "customer") or "Клиент"
-    email    = first_nonempty(p, "email") or ""   # 👈 email от клиента
+    email    = first_nonempty(p, "email") or ""   # email клиента
     phone    = first_nonempty(p, "phone", "phoneNumber") or "—"
     comment  = to_str(first_nonempty(p, "comment", "note", "remark") or "")
     currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
-    fcmToken = to_str(p.get("fcmToken") or "").strip()  # 👈 новый параметр (строго очищаем)
+    fcmToken = to_str(p.get("fcmToken") or "").strip()  # клиентский FCM
 
     items = _normalize_items(p.get("items"))
     total_input = first_nonempty(p, "total", "sum", "amount")
@@ -161,7 +180,7 @@ def send_order():
         order_doc: Dict[str, Any] = {
             "orderId": order_id,
             "customer": customer,
-            "email": email,        # 👈 сохраняем email
+            "email": email,
             "phone": phone,
             "comment": comment,
             "currency": currency,
@@ -170,7 +189,7 @@ def send_order():
             "total": total_num,
             "totalText": total_text,
         }
-        if fcmToken:  # 👈 сохраняем токен клиента только если непустой
+        if fcmToken:
             order_doc["fcmToken"] = fcmToken
         if items:
             order_doc["items"] = items
@@ -182,12 +201,12 @@ def send_order():
         return Response(json.dumps({"ok": False, "error": "firestore save failed"}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
-    # ⬇️ На создании заказа пуш уходит ТОЛЬКО админу
+    # Пуш только админу на этапе создания
     EXECUTOR.submit(lambda: send_push_to_admin(order_id, customer, phone, comment, total_text, currency))
     return Response(json.dumps({"ok": True, "orderId": order_id}, ensure_ascii=False),
                     content_type="application/json; charset=utf-8")
 
-# === Push клиенту при смене статуса ===
+# === Заготовки текста для клиента ===
 def _status_title_and_body(status: str) -> Dict[str, str]:
     s = status.lower().strip()
     if s == "progress":
@@ -203,12 +222,15 @@ def _send_push_to_customer_tokens(tokens: List[str], data: Dict[str, str]) -> No
         print("ℹ️ Нет токенов клиента для отправки.", flush=True)
         return
     for t in tokens:
+        tok = to_str(t).strip()
+        if not tok:
+            continue
         try:
-            msg = messaging.Message(token=t, data=data)
+            msg = messaging.Message(token=tok, data={k: to_str(v) for k, v in data.items()})
             resp = messaging.send(msg)
-            print(f"📤 FCM to user token={t[:12]}… ok={resp}", flush=True)
+            print(f"📤 FCM to user token={tok[:12]}… ok={resp}", flush=True)
         except Exception as e:
-            print(f"❌ FCM send error for token={t[:12]}…: {e}", flush=True)
+            print(f"❌ FCM send error for token={tok[:12]}…: {e}", flush=True)
 
 def _collect_user_tokens_by_email(email: str) -> List[str]:
     if not email:
@@ -225,11 +247,13 @@ def _collect_user_tokens_by_email(email: str) -> List[str]:
             tok = (d.to_dict() or {}).get("token")
             if isinstance(tok, str) and tok.strip():
                 tokens.append(tok.strip())
-        return tokens
+        # Уникализируем
+        return list(dict.fromkeys(tokens))
     except Exception as e:
         print("❌ collect tokens by email error:", e, flush=True)
         return []
 
+# === Роут /update-order-status — пуш клиенту ===
 @app.post("/update-order-status")
 def update_order_status():
     p = request.get_json(force=True, silent=True) or {}
@@ -264,7 +288,7 @@ def update_order_status():
         if notify_customer:
             order = snap.to_dict() or {}
             email = to_str(order.get("email"))
-            fcmToken = to_str(order.get("fcmToken") or "").strip()  # 👈 берём токен из заказа (очищаем)
+            fcmToken = to_str(order.get("fcmToken") or "").strip()
             total_text = to_str(order.get("totalText") or order.get("total") or "")
             currency = to_str(order.get("currency") or "TJS")
 
@@ -280,8 +304,8 @@ def update_order_status():
                 "body": title_body["body"],
                 "status": status,
                 "orderId": str(order_id),
-                "total": total_text,
-                "currency": currency,
+                "total": to_str(total_text),
+                "currency": to_str(currency),
             }
             EXECUTOR.submit(lambda: _send_push_to_customer_tokens(tokens, data_payload))
 
@@ -292,6 +316,7 @@ def update_order_status():
         return Response(json.dumps({"ok": False, "error": "update failed"}, ensure_ascii=False),
                         status=500, content_type="application/json; charset=utf-8")
 
+# === Служебные ===
 @app.get("/health")
 def health():
     return Response("OK", content_type="text/plain; charset=utf-8")
