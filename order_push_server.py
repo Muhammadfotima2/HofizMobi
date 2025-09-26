@@ -8,7 +8,7 @@ from flask import Flask, request, Response
 
 import firebase_admin
 from firebase_admin import credentials, messaging, firestore
-from flask_cors import CORS  # ✅ добавлено для CORS
+from flask_cors import CORS  # ✅ CORS
 
 # === Пул потоков для фоновых задач ===
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -33,7 +33,7 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # ✅ разрешаем CORS для всех роутов
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # === Утилиты ===
 def first_nonempty(d: Dict[str, Any], *keys) -> Optional[str]:
@@ -47,69 +47,7 @@ def first_nonempty(d: Dict[str, Any], *keys) -> Optional[str]:
 def to_str(v) -> str:
     return "" if v is None else str(v)
 
-def _parse_num(v) -> Optional[float]:
-    if v is None:
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip()
-    if not s:
-        return None
-    s = s.replace("\u00A0", " ")
-    filtered = [ch for ch in s if ch.isdigit() or ch in [".", ",", "-"]]
-    if not filtered:
-        return None
-    s = "".join(filtered)
-    if "." in s and "," in s:
-        s = s.replace(",", "")
-    elif "," in s and "." not in s:
-        s = s.replace(",", ".")
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-def _num_currency(x: float) -> float:
-    v = round(x * 100) / 100.0
-    return float(int(v)) if abs(v - int(v)) < 1e-9 else v
-
-def _normalize_item(raw: Dict[str, Any]) -> Dict[str, Any]:
-    price = _parse_num(raw.get("price")) or _parse_num(raw.get("unitPrice")) or _parse_num(raw.get("amount")) or 0.0
-    qty   = _parse_num(raw.get("qty"))   or _parse_num(raw.get("quantity"))  or _parse_num(raw.get("count"))  or 1.0
-    name = first_nonempty(raw, "name", "title", "product", "fullName", "display")
-    if not name:
-        brand = to_str(raw.get("brand")).strip()
-        model = first_nonempty(raw, "model", "code")
-        variant = to_str(raw.get("variant")).strip()
-        parts = [p for p in [brand or None, model, f"({variant})" if variant else None] if p]
-        name = " ".join(parts) if parts else "Товар"
-    item: Dict[str, Any] = {
-        "name": name,
-        "price": _num_currency(max(0.0, float(price))),
-        "qty": _num_currency(max(1.0, float(qty))),
-    }
-    for k in ["brand", "variant", "quality", "badge"]:
-        v = raw.get(k)
-        if v is not None and str(v).strip():
-            item[k] = str(v).strip()
-    return item
-
-def _normalize_items(v: Any) -> Optional[List[Dict[str, Any]]]:
-    if not v or not isinstance(v, list):
-        return None
-    out: List[Dict[str, Any]] = []
-    for it in v:
-        if isinstance(it, dict):
-            out.append(_normalize_item(it))
-    return out or None
-
-def _compute_total_from_items(items: List[Dict[str, Any]]) -> float:
-    s = 0.0
-    for it in items:
-        s += float(it.get("price", 0.0)) * float(it.get("qty", 1.0))
-    return _num_currency(s)
-
-# === Push админу (DATA-only) ===
+# === Push админу (новый заказ) ===
 def send_push_to_admin(order_id: str, customer: str, phone: str,
                        comment: str, total_text: str, currency: str):
     data_payload = {
@@ -126,65 +64,7 @@ def send_push_to_admin(order_id: str, customer: str, phone: str,
     print(f"✅ FCM sent (topic=admin): {resp} | data={data_payload}", flush=True)
     return resp
 
-# === Роут /send-order ===
-@app.post("/send-order")
-def send_order():
-    p = request.get_json(force=True, silent=True) or {}
-    print("📥 /send-order payload:", p, flush=True)
-
-    order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
-    customer = first_nonempty(p, "customerName", "name", "customer") or "Клиент"
-    email    = first_nonempty(p, "email") or ""   # 👈 email от клиента
-    phone    = first_nonempty(p, "phone", "phoneNumber") or "—"
-    comment  = to_str(first_nonempty(p, "comment", "note", "remark") or "")
-    currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
-
-    items = _normalize_items(p.get("items"))
-    total_input = first_nonempty(p, "total", "sum", "amount")
-    total_num = _parse_num(total_input)
-    if total_num is None and items:
-        total_num = _compute_total_from_items(items)
-    if total_num is None:
-        return Response(json.dumps({"ok": False, "error": "total required"}, ensure_ascii=False),
-                        status=400, content_type="application/json; charset=utf-8")
-    total_num = _num_currency(float(total_num))
-    total_text = str(total_input).strip() if total_input else str(total_num)
-
-    try:
-        if order_id == "N/A":
-            doc_ref = db.collection("orders").document()
-            order_id = doc_ref.id
-        else:
-            doc_ref = db.collection("orders").document(str(order_id))
-
-        order_doc: Dict[str, Any] = {
-            "orderId": order_id,
-            "customer": customer,
-            "email": email,        # 👈 сохраняем email
-            "phone": phone,
-            "comment": comment,
-            "currency": currency,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "status": "new",
-            "total": total_num,
-            "totalText": total_text,
-        }
-        if items:
-            order_doc["items"] = items
-
-        doc_ref.set(order_doc)
-        print(f"💾 Order saved [id={order_id}] → {order_doc}", flush=True)
-    except Exception as e:
-        print("❌ Firestore save error:", e, flush=True)
-        return Response(json.dumps({"ok": False, "error": "firestore save failed"}, ensure_ascii=False),
-                        status=500, content_type="application/json; charset=utf-8")
-
-    # ⬇️ На создании заказа пуш уходит ТОЛЬКО админу (клиенту не шлём здесь)
-    EXECUTOR.submit(lambda: send_push_to_admin(order_id, customer, phone, comment, total_text, currency))
-    return Response(json.dumps({"ok": True, "orderId": order_id}, ensure_ascii=False),
-                    content_type="application/json; charset=utf-8")
-
-# === ДОБАВЛЕНО: Push клиенту при смене статуса ===
+# === Helpers для клиента ===
 def _status_title_and_body(status: str) -> Dict[str, str]:
     s = status.lower().strip()
     if s == "progress":
@@ -195,11 +75,7 @@ def _status_title_and_body(status: str) -> Dict[str, str]:
         return {"title": "💔 Заказ отменён", "body": "Очень жаль 😔 Ваш заказ был отменён."}
     return {"title": "ℹ️ Статус обновлён", "body": "Статус вашего заказа был обновлён."}
 
-def _send_push_to_customer_tokens(tokens: List[str], data: Dict[str, str]) -> None:
-    if not tokens:
-        print("ℹ️ Нет токенов клиента для отправки.", flush=True)
-        return
-    # Отправляем DATA-only (как в клиенте)
+def _send_push_to_tokens(tokens: List[str], data: Dict[str, str]) -> None:
     for t in tokens:
         try:
             msg = messaging.Message(token=t, data=data)
@@ -228,18 +104,54 @@ def _collect_user_tokens_by_email(email: str) -> List[str]:
         print("❌ collect tokens by email error:", e, flush=True)
         return []
 
+# === Роуты ===
+@app.post("/send-order")
+def send_order():
+    p = request.get_json(force=True, silent=True) or {}
+    print("📥 /send-order payload:", p, flush=True)
+
+    order_id = first_nonempty(p, "orderId", "order_id", "id") or "N/A"
+    customer = first_nonempty(p, "customerName", "name", "customer") or "Клиент"
+    email    = first_nonempty(p, "email") or ""
+    phone    = first_nonempty(p, "phone", "phoneNumber") or "—"
+    comment  = to_str(first_nonempty(p, "comment", "note", "remark") or "")
+    currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
+
+    total = p.get("total") or 0
+    try:
+        if order_id == "N/A":
+            doc_ref = db.collection("orders").document()
+            order_id = doc_ref.id
+        else:
+            doc_ref = db.collection("orders").document(str(order_id))
+
+        order_doc: Dict[str, Any] = {
+            "orderId": order_id,
+            "customer": customer,
+            "email": email,
+            "phone": phone,
+            "comment": comment,
+            "currency": currency,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "status": "new",
+            "total": total,
+            "totalText": str(total),
+            # 👇 сохраняем fcmToken, если он пришёл в заказе
+            "fcmToken": to_str(p.get("fcmToken") or ""),
+        }
+        doc_ref.set(order_doc, merge=True)
+        print(f"💾 Order saved [id={order_id}] → {order_doc}", flush=True)
+    except Exception as e:
+        print("❌ Firestore save error:", e, flush=True)
+        return Response(json.dumps({"ok": False, "error": "firestore save failed"}, ensure_ascii=False),
+                        status=500, content_type="application/json; charset=utf-8")
+
+    EXECUTOR.submit(lambda: send_push_to_admin(order_id, customer, phone, comment, str(total), currency))
+    return Response(json.dumps({"ok": True, "orderId": order_id}, ensure_ascii=False),
+                    content_type="application/json; charset=utf-8")
+
 @app.post("/update-order-status")
 def update_order_status():
-    """
-    Ожидает JSON:
-    {
-      "orderId": "...",           # обязательно
-      "status": "progress|done|canceled",
-      "notifyCustomer": true      # опц., по умолчанию true
-    }
-    Обновляет статус в /orders/{orderId} и, если notifyCustomer=true,
-    отправляет пуш клиенту (по email из заказа).
-    """
     p = request.get_json(force=True, silent=True) or {}
     print("🔄 /update-order-status payload:", p, flush=True)
 
@@ -259,23 +171,16 @@ def update_order_status():
                             status=404, content_type="application/json; charset=utf-8")
 
         update_fields: Dict[str, Any] = {"status": status}
-        if status == "done":
-            update_fields["doneAt"] = firestore.SERVER_TIMESTAMP
-        if status == "canceled":
-            update_fields["canceledAt"] = firestore.SERVER_TIMESTAMP
-        if status == "progress":
-            update_fields["progressAt"] = firestore.SERVER_TIMESTAMP
-
         doc_ref.set(update_fields, merge=True)
         print(f"📝 Order [{order_id}] status → {status}", flush=True)
 
         if notify_customer:
             order = snap.to_dict() or {}
             email = to_str(order.get("email"))
+            fcm_token = to_str(order.get("fcmToken") or "")
             total_text = to_str(order.get("totalText") or order.get("total") or "")
             currency = to_str(order.get("currency") or "TJS")
 
-            tokens = _collect_user_tokens_by_email(email)
             title_body = _status_title_and_body(status)
             data_payload = {
                 "title": title_body["title"],
@@ -285,7 +190,17 @@ def update_order_status():
                 "total": total_text,
                 "currency": currency,
             }
-            EXECUTOR.submit(lambda: _send_push_to_customer_tokens(tokens, data_payload))
+
+            tokens: List[str] = []
+            if fcm_token:
+                tokens.append(fcm_token)
+            else:
+                tokens = _collect_user_tokens_by_email(email)
+
+            if tokens:
+                EXECUTOR.submit(lambda: _send_push_to_tokens(tokens, data_payload))
+            else:
+                print("ℹ️ Нет токенов клиента для отправки.", flush=True)
 
         return Response(json.dumps({"ok": True, "orderId": order_id, "status": status}, ensure_ascii=False),
                         content_type="application/json; charset=utf-8")
