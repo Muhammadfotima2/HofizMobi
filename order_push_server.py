@@ -138,7 +138,7 @@ def send_order():
     phone    = first_nonempty(p, "phone", "phoneNumber") or "—"
     comment  = to_str(first_nonempty(p, "comment", "note", "remark") or "")
     currency = to_str(first_nonempty(p, "currency", "curr") or "TJS")
-    fcmToken = to_str(p.get("fcmToken"))  # 👈 новый параметр
+    fcmToken = to_str(p.get("fcmToken") or "").strip()  # 👈 новый параметр (строго очищаем)
 
     items = _normalize_items(p.get("items"))
     total_input = first_nonempty(p, "total", "sum", "amount")
@@ -170,8 +170,8 @@ def send_order():
             "total": total_num,
             "totalText": total_text,
         }
-        if fcmToken:
-            order_doc["fcmToken"] = fcmToken   # 👈 сохраняем токен клиента
+        if fcmToken:  # 👈 сохраняем токен клиента только если непустой
+            order_doc["fcmToken"] = fcmToken
         if items:
             order_doc["items"] = items
 
@@ -264,7 +264,7 @@ def update_order_status():
         if notify_customer:
             order = snap.to_dict() or {}
             email = to_str(order.get("email"))
-            fcmToken = to_str(order.get("fcmToken"))  # 👈 берём токен из заказа
+            fcmToken = to_str(order.get("fcmToken") or "").strip()  # 👈 берём токен из заказа (очищаем)
             total_text = to_str(order.get("totalText") or order.get("total") or "")
             currency = to_str(order.get("currency") or "TJS")
 
